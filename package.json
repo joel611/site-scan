@@ -1,0 +1,21 @@
+{
+  "name": "site-scan-map",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "site-scan": "src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "node-html-parser": "^7.1.0"
+  }
+}
