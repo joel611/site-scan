@@ -83,6 +83,29 @@ svg#graph-svg { width: 100%; height: 100%; }
 .data-table td:first-child { color: #e2e8f0; font-family: monospace; font-size: 12px; }
 .data-table tr:hover td { background: #1e2235; }
 h3.section-title { font-size: 14px; font-weight: 600; color: #e2e8f0; margin-bottom: 12px; }
+
+/* Detail panel */
+#graph-view { position: relative; }
+#detail-panel { position: absolute; right: 0; top: 0; bottom: 0; width: 320px; background: #1a1d27; border-left: 1px solid #2d3148; display: flex; flex-direction: column; transform: translateX(100%); transition: transform 0.2s ease; z-index: 10; overflow: hidden; }
+#detail-panel.open { transform: translateX(0); }
+#dp-header { display: flex; align-items: flex-start; gap: 8px; padding: 14px 14px 10px; border-bottom: 1px solid #2d3148; flex-shrink: 0; }
+#dp-title { flex: 1; font-size: 13px; font-weight: 600; color: #e2e8f0; word-break: break-word; line-height: 1.4; }
+#dp-close { background: none; border: none; color: #64748b; font-size: 18px; cursor: pointer; padding: 0 2px; line-height: 1; flex-shrink: 0; }
+#dp-close:hover { color: #e2e8f0; }
+#dp-url { padding: 8px 14px 4px; font-family: monospace; font-size: 11px; color: #64748b; word-break: break-all; flex-shrink: 0; }
+#dp-meta { padding: 4px 14px 10px; font-size: 12px; color: #94a3b8; display: flex; gap: 12px; flex-shrink: 0; }
+#dp-visit { margin: 0 14px 12px; background: #1e2235; border: 1px solid #2d3148; border-radius: 6px; color: #a78bfa; font-size: 12px; padding: 5px 10px; cursor: pointer; text-align: left; flex-shrink: 0; }
+#dp-visit:hover { background: #252840; }
+#dp-body { flex: 1; overflow-y: auto; padding-bottom: 16px; }
+.dp-section { padding: 10px 14px; border-top: 1px solid #2d3148; }
+.dp-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+.dp-count { color: #475569; font-weight: normal; }
+.dp-list-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 5px; cursor: pointer; font-size: 12px; color: #94a3b8; }
+.dp-list-item:hover { background: #1e2235; color: #e2e8f0; }
+.dp-item-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dead-badge { background: #7f1d1d; border: 1px solid #dc2626; color: #fca5a5; font-size: 10px; padding: 1px 5px; border-radius: 3px; flex-shrink: 0; }
+.dp-empty { font-size: 12px; color: #475569; font-style: italic; padding: 2px 0; }
+.dp-more { font-size: 11px; color: #475569; font-style: italic; padding: 2px 8px; }
 </style>
 </head>
 <body>
@@ -130,6 +153,25 @@ h3.section-title { font-size: 14px; font-weight: 600; color: #e2e8f0; margin-bot
         <div class="t-url" id="tt-url"></div>
         <div class="t-row">Status: <span id="tt-status"></span> &nbsp; Depth: <span id="tt-depth"></span></div>
         <div class="t-row">In: <span id="tt-in"></span> &nbsp; Out: <span id="tt-out"></span></div>
+      </div>
+    </div>
+    <div id="detail-panel">
+      <div id="dp-header">
+        <div id="dp-title"></div>
+        <button id="dp-close" onclick="closePanel()">✕</button>
+      </div>
+      <div id="dp-url"></div>
+      <div id="dp-meta"><span>Status: <span id="dp-status"></span></span><span id="dp-depth-meta"></span></div>
+      <button id="dp-visit" onclick="visitPage()">Visit page →</button>
+      <div id="dp-body">
+        <div class="dp-section">
+          <div class="dp-section-title">Sources <span id="dp-sources-count" class="dp-count"></span></div>
+          <div id="dp-sources"></div>
+        </div>
+        <div class="dp-section">
+          <div class="dp-section-title">Backlinks <span id="dp-backlinks-count" class="dp-count"></span></div>
+          <div id="dp-backlinks"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -217,10 +259,13 @@ function toggleFilter(type) {
 }
 
 // --- D3 Graph ---
-let simulation, nodeSelection, linkSelection, labelSelection;
+let simulation, nodeSelection, linkSelection, labelSelection, svgSelection, zoomBehavior;
+let selectedNodeId = null;
+let panelNode = null;
 
 function initGraph() {
-  const svg = d3.select('#graph-svg');
+  svgSelection = d3.select('#graph-svg');
+  const svg = svgSelection;
   const width = document.getElementById('graph-canvas').clientWidth;
   const height = document.getElementById('graph-canvas').clientHeight;
 
@@ -228,7 +273,8 @@ function initGraph() {
 
   const g = svg.append('g');
 
-  svg.call(d3.zoom().scaleExtent([0.05, 8]).on('zoom', (e) => g.attr('transform', e.transform)));
+  zoomBehavior = d3.zoom().scaleExtent([0.05, 8]).on('zoom', (e) => g.attr('transform', e.transform));
+  svg.call(zoomBehavior);
 
   const defs = svg.append('defs');
   defs.append('marker')
@@ -310,14 +356,14 @@ function updateGraph() {
     .on('mouseover', showTooltip)
     .on('mousemove', moveTooltip)
     .on('mouseout', hideTooltip)
-    .on('click', (e, d) => window.open(d.url, '_blank'));
+    .on('click', (e, d) => { e.stopPropagation(); selectedNodeId === d.id ? closePanel() : openPanel(d); });
 
   nodeSelection = nodeEnter.merge(nodeSelection)
     .attr('r', nodeRadius)
     .attr('fill', d => d.dead ? '#ef4444' : colorScale(d.section))
     .attr('opacity', d => d.orphan ? 0.35 : 0.9)
-    .attr('stroke', d => d.dead ? '#dc2626' : 'rgba(255,255,255,0.15)')
-    .attr('stroke-width', 1)
+    .attr('stroke', d => selectedNodeId === d.id ? '#ffffff' : (d.dead ? '#dc2626' : 'rgba(255,255,255,0.15)'))
+    .attr('stroke-width', d => selectedNodeId === d.id ? 2 : 1)
     .style('cursor', 'pointer');
 
   // Labels (only for low-node-count views)
@@ -416,6 +462,107 @@ function sortTable(id, colIdx) {
   rows.forEach(r => tbody.appendChild(r));
 }
 
+// --- Adjacency Index ---
+const nodeById = new Map(GRAPH_DATA.nodes.map(n => [n.id, n]));
+const edgesFrom = new Map(GRAPH_DATA.nodes.map(n => [n.id, []]));
+const edgesTo = new Map(GRAPH_DATA.nodes.map(n => [n.id, []]));
+GRAPH_DATA.edges.forEach(e => {
+  if (edgesFrom.has(e.source)) edgesFrom.get(e.source).push(e.target);
+  if (edgesTo.has(e.target)) edgesTo.get(e.target).push(e.source);
+});
+
+function getSourceNodes(nodeId) {
+  return (edgesFrom.get(nodeId) || []).map(id => nodeById.get(id)).filter(Boolean);
+}
+function getBacklinkNodes(nodeId) {
+  return (edgesTo.get(nodeId) || []).map(id => nodeById.get(id)).filter(Boolean);
+}
+
+// --- Detail Panel ---
+function openPanel(node) {
+  panelNode = node;
+  selectedNodeId = node.id;
+  document.getElementById('dp-title').textContent = node.title || '(no title)';
+  document.getElementById('dp-url').textContent = node.url;
+  document.getElementById('dp-status').textContent = node.status || 'timeout';
+  document.getElementById('dp-depth-meta').textContent = 'Depth: ' + node.depth;
+  renderSources(node.id);
+  renderBacklinks(node.id);
+  document.getElementById('detail-panel').classList.add('open');
+  updateGraph();
+}
+
+function renderNodeList(container, nodes, cap) {
+  container.innerHTML = '';
+  nodes.slice(0, cap).forEach(n => {
+    const item = document.createElement('div');
+    item.className = 'dp-list-item';
+    const label = document.createElement('span');
+    label.className = 'dp-item-label';
+    let path;
+    try { path = new URL(n.url).pathname || '/'; } catch(_) { path = n.url; }
+    label.textContent = n.title || path;
+    label.title = n.url;
+    item.appendChild(label);
+    if (n.dead) {
+      const badge = document.createElement('span');
+      badge.className = 'dead-badge';
+      badge.textContent = 'dead';
+      item.appendChild(badge);
+    }
+    item.addEventListener('click', () => focusNode(n.id));
+    container.appendChild(item);
+  });
+  if (nodes.length > cap) {
+    const more = document.createElement('div');
+    more.className = 'dp-more';
+    more.textContent = '+' + (nodes.length - cap) + ' more';
+    container.appendChild(more);
+  }
+}
+
+function renderSources(nodeId) {
+  const nodes = getSourceNodes(nodeId);
+  const container = document.getElementById('dp-sources');
+  document.getElementById('dp-sources-count').textContent = '(' + nodes.length + ')';
+  if (nodes.length === 0) { container.innerHTML = '<div class="dp-empty">No outbound links</div>'; return; }
+  renderNodeList(container, nodes, 50);
+}
+
+function renderBacklinks(nodeId) {
+  const nodes = getBacklinkNodes(nodeId);
+  const container = document.getElementById('dp-backlinks');
+  document.getElementById('dp-backlinks-count').textContent = '(' + nodes.length + ')';
+  if (nodes.length === 0) { container.innerHTML = '<div class="dp-empty">No backlinks (orphan)</div>'; return; }
+  renderNodeList(container, nodes, 50);
+}
+
+function closePanel() {
+  if (!panelNode) return;
+  document.getElementById('detail-panel').classList.remove('open');
+  panelNode = null;
+  selectedNodeId = null;
+  updateGraph();
+}
+
+function visitPage() {
+  if (panelNode) window.open(panelNode.url, '_blank');
+}
+
+function focusNode(id) {
+  const node = nodeById.get(id);
+  if (!node) return;
+  openPanel(node);
+  if (node.x !== undefined && svgSelection && zoomBehavior) {
+    const canvas = document.getElementById('graph-canvas');
+    const scale = 1.5;
+    svgSelection.transition().duration(500).call(
+      zoomBehavior.transform,
+      d3.zoomIdentity.translate(canvas.clientWidth / 2 - node.x * scale, canvas.clientHeight / 2 - node.y * scale).scale(scale)
+    );
+  }
+}
+
 // --- Init ---
 buildSidebar();
 initGraph();
@@ -424,6 +571,10 @@ buildStats();
 // set initial btn states
 document.getElementById('orphan-btn').classList.add('active');
 document.getElementById('dead-btn').classList.add('active');
+
+// Dismissal
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closePanel(); });
+document.getElementById('graph-canvas').addEventListener('click', () => closePanel());
 </script>
 </body>
 </html>`
