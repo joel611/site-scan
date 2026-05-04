@@ -66,11 +66,12 @@ function normalizeUrl(href: string, base: string, keepQuery: boolean): string | 
   }
 }
 
-function extractLinks(html: string, pageUrl: string, keepQuery: boolean): string[] {
+export function extractLinks(html: string, pageUrl: string, keepQuery: boolean, noFilterNav = false): string[] {
   const root = parse(html)
   const links: string[] = []
 
-  for (const a of root.querySelectorAll("a[href]")) {
+  const selector = noFilterNav ? "a[href]" : "a[href]:not(header a, footer a, nav a)"
+  for (const a of root.querySelectorAll(selector)) {
     const href = a.getAttribute("href") || ""
     if (!href) continue
     if (href.startsWith("#")) continue
@@ -128,7 +129,7 @@ async function runPool<T>(tasks: (() => Promise<T>)[], concurrency: number): Pro
 }
 
 export async function crawl(options: ScanOptions): Promise<CrawlRecord[]> {
-  const { startUrl, depth, limit, noRobots, keepQuery } = options
+  const { startUrl, depth, limit, noRobots, keepQuery, noFilterNav } = options
   const baseHostname = new URL(startUrl).hostname
 
   const robots = noRobots ? { disallow: [] } : await fetchRobots(startUrl)
@@ -162,16 +163,17 @@ export async function crawl(options: ScanOptions): Promise<CrawlRecord[]> {
       if (normalizedFinal !== pageUrl) visited.add(normalizedFinal)
 
       const title = extractTitle(html)
-      const rawLinks = html ? extractLinks(html, finalUrl, keepQuery) : []
+      const allLinks = html ? extractLinks(html, finalUrl, keepQuery, true) : []
+      const edgeLinks = new Set(html ? extractLinks(html, finalUrl, keepQuery, noFilterNav) : [])
 
       const outboundLinks: string[] = []
       const toEnqueue: QueueItem[] = []
 
-      for (const link of rawLinks) {
+      for (const link of allLinks) {
         try {
           const linkUrl = new URL(link)
           if (linkUrl.hostname !== baseHostname) continue
-          outboundLinks.push(link)
+          if (edgeLinks.has(link)) outboundLinks.push(link)
           if (!visited.has(link)) {
             const nextDepth = pageDepth + 1
             if (depth === null || nextDepth <= depth) {

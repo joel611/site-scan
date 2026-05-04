@@ -16,6 +16,9 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "node-html-parser": "^7.1.0"
+    "node-html-parser": "^7.1.0",
+    "sigma": "^3.0.0",
+    "graphology": "^0.26.0",
+    "graphology-layout-forceatlas2": "^0.10.1"
   }
 }

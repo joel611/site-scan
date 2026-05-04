@@ -2,7 +2,7 @@ import type { CrawlRecord, Graph, GraphEdge, GraphNode, GraphStats, LangStat, Se
 
 const LANG_RE = /^[a-z]{2}(-[a-z]{2,4})?$/i
 
-function extractLangSection(url: string): { lang: string; section: string } {
+export function extractBaseSection(url: string): { lang: string; section: string } {
   try {
     const { pathname } = new URL(url)
     const parts = pathname.split("/").filter(Boolean)
@@ -17,7 +17,7 @@ function extractLangSection(url: string): { lang: string; section: string } {
   }
 }
 
-function getPattern(url: string): string {
+export function getPattern(url: string): string {
   try {
     const { pathname } = new URL(url)
     const parts = pathname.split("/").filter(Boolean)
@@ -34,7 +34,82 @@ function getPattern(url: string): string {
   }
 }
 
-export function buildGraph(records: CrawlRecord[], startUrl: string): Graph {
+export function inferSectionFromInbound(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  rootUrl: string
+): Map<string, string> {
+  const result = new Map<string, string>()
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]))
+
+  const inboundByTarget = new Map<string, GraphEdge[]>()
+  for (const edge of edges) {
+    const list = inboundByTarget.get(edge.target) ?? []
+    list.push(edge)
+    inboundByTarget.set(edge.target, list)
+  }
+
+  for (const [targetUrl, inboundEdges] of inboundByTarget) {
+    const voters: string[] = []
+    for (const edge of inboundEdges) {
+      if (edge.source === rootUrl) continue
+      const sourceNode = nodeMap.get(edge.source)
+      if (!sourceNode) continue
+      voters.push(sourceNode.section)
+    }
+
+    const counts = new Map<string, number>()
+    for (const section of voters) {
+      counts.set(section, (counts.get(section) ?? 0) + 1)
+    }
+
+    for (const [section, count] of counts) {
+      if (count / voters.length > 0.5) {
+        result.set(targetUrl, section)
+        break
+      }
+    }
+  }
+
+  return result
+}
+
+export function filterHighIndegreeEdges(graph: Graph, navThreshold: number): Graph {
+  if (navThreshold === 0) return graph
+
+  const { nodes, edges, stats } = graph
+  const totalPages = nodes.length
+  const thresholdCount = (navThreshold / 100) * totalPages
+
+  const rawInDegree = new Map<string, number>()
+  for (const edge of edges) {
+    rawInDegree.set(edge.target, (rawInDegree.get(edge.target) ?? 0) + 1)
+  }
+
+  const filteredEdges = edges.filter(e => (rawInDegree.get(e.target) ?? 0) <= thresholdCount)
+
+  const nodeMap = new Map(nodes.map(n => [n.id, { ...n, inbound: 0, outbound: 0 }]))
+  for (const edge of filteredEdges) {
+    nodeMap.get(edge.source)!.outbound++
+    nodeMap.get(edge.target)!.inbound++
+  }
+
+  const rootUrl = nodes.find(n => n.depth === 0)?.url ?? ""
+  const newNodes = Array.from(nodeMap.values()).map(node => ({
+    ...node,
+    orphan: node.inbound === 0 && node.url !== rootUrl,
+  }))
+
+  const newStats = {
+    ...stats,
+    totalEdges: filteredEdges.length,
+    orphanCount: newNodes.filter(n => n.orphan).length,
+  }
+
+  return { nodes: newNodes, edges: filteredEdges, stats: newStats }
+}
+
+export function buildGraph(records: CrawlRecord[], startUrl: string, navThreshold = 50): Graph {
   const rootUrl = (() => {
     try { return new URL(startUrl).href } catch { return startUrl }
   })()
@@ -43,7 +118,7 @@ export function buildGraph(records: CrawlRecord[], startUrl: string): Graph {
 
   for (const rec of records) {
     const url = rec.finalUrl || rec.url
-    const { lang, section } = extractLangSection(url)
+    const { lang, section } = extractBaseSection(url)
     nodeMap.set(url, {
       id: url,
       url,
@@ -61,6 +136,7 @@ export function buildGraph(records: CrawlRecord[], startUrl: string): Graph {
   }
 
   const edges: GraphEdge[] = []
+  const seenEdges = new Set<string>()
 
   for (const rec of records) {
     const sourceUrl = rec.finalUrl || rec.url
@@ -69,6 +145,9 @@ export function buildGraph(records: CrawlRecord[], startUrl: string): Graph {
 
     for (const link of rec.outboundLinks) {
       if (nodeMap.has(link)) {
+        const key = sourceUrl + '->' + link
+        if (seenEdges.has(key)) continue
+        seenEdges.add(key)
         edges.push({ source: sourceUrl, target: link })
         sourceNode.outbound++
         nodeMap.get(link)!.inbound++
@@ -83,6 +162,11 @@ export function buildGraph(records: CrawlRecord[], startUrl: string): Graph {
   for (const node of nodeMap.values()) {
     node.orphan = node.inbound === 0 && node.url !== normalizedRoot
     node.dead = node.status >= 400 || node.status === 0
+  }
+
+  const inferredSections = inferSectionFromInbound(Array.from(nodeMap.values()), edges, normalizedRoot)
+  for (const [url, section] of inferredSections) {
+    nodeMap.get(url)!.section = section
   }
 
   const nodes = Array.from(nodeMap.values())
@@ -150,5 +234,5 @@ export function buildGraph(records: CrawlRecord[], startUrl: string): Graph {
     isMultilingual,
   }
 
-  return { nodes, edges, stats }
+  return filterHighIndegreeEdges({ nodes, edges, stats }, navThreshold)
 }

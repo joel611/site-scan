@@ -6,17 +6,19 @@ import type { Graph, ScanOptions } from "./types"
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 export async function generateReport(graph: Graph, options: ScanOptions): Promise<void> {
-  const d3Source = readFileSync(join(__dirname, "vendor/d3.min.js"), "utf-8")
+  const sigmaSource = readFileSync(join(__dirname, "../node_modules/sigma/dist/sigma.min.js"), "utf-8")
+  const graphologySource = readFileSync(join(__dirname, "../node_modules/graphology/dist/graphology.umd.min.js"), "utf-8")
+  const forceAtlas2Source = readFileSync(join(__dirname, "vendor/forceatlas2.bundle.js"), "utf-8")
   const graphJson = JSON.stringify({ nodes: graph.nodes, edges: graph.edges, stats: graph.stats })
   const domain = options.domain
   const timestamp = new Date().toISOString()
   const outputFile = `${domain.replace(/\./g, "-")}-scan.html`
 
-  const html = buildHtml(graphJson, d3Source, domain, timestamp, graph.stats)
+  const html = buildHtml(graphJson, sigmaSource, graphologySource, forceAtlas2Source, domain, timestamp, graph.stats)
   await Bun.write(outputFile, html)
 }
 
-function buildHtml(graphJson: string, d3Source: string, domain: string, timestamp: string, stats: any): string {
+function buildHtml(graphJson: string, sigmaSource: string, graphologySource: string, forceAtlas2Source: string, domain: string, timestamp: string, stats: any): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -58,7 +60,9 @@ input[type=range] { width: 100%; accent-color: #a78bfa; }
 .toggle-btn.active { background: #2d2455; border-color: #7c3aed; color: #a78bfa; }
 
 #graph-canvas { flex: 1; position: relative; overflow: hidden; }
-svg#graph-svg { width: 100%; height: 100%; }
+#sigma-container { width: 100%; height: 100%; position: relative; }
+#hull-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; }
+#sigma-container > canvas { z-index: 1; }
 
 /* Tooltip */
 #tooltip { position: absolute; background: #1a1d27; border: 1px solid #2d3148; border-radius: 8px; padding: 10px 14px; font-size: 12px; pointer-events: none; max-width: 280px; z-index: 100; opacity: 0; transition: opacity 0.1s; }
@@ -69,6 +73,9 @@ svg#graph-svg { width: 100%; height: 100%; }
 
 /* Stats view */
 #stats-view { flex: 1; overflow-y: auto; padding: 24px; display: none; }
+
+/* Links view */
+#links-view { flex: 1; overflow-y: auto; padding: 24px; display: none; }
 .cards { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 28px; }
 .card { background: #1a1d27; border: 1px solid #2d3148; border-radius: 10px; padding: 16px 20px; min-width: 140px; }
 .card .c-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 6px; }
@@ -124,6 +131,7 @@ h3.section-title { font-size: 14px; font-weight: 600; color: #e2e8f0; margin-bot
 <div id="tabs">
   <div class="tab active" onclick="switchTab('graph')">Graph</div>
   <div class="tab" onclick="switchTab('stats')">Stats</div>
+  <div class="tab" onclick="switchTab('links')">Pages</div>
 </div>
 
 <div id="main">
@@ -140,6 +148,11 @@ h3.section-title { font-size: 14px; font-weight: 600; color: #e2e8f0; margin-bot
         <div class="range-row"><span id="depth-min-label">0</span><span id="depth-max-label">10</span></div>
       </div>
       <div class="filter-group">
+        <h2>Cluster Strength</h2>
+        <input type="range" id="cluster-strength" min="0" max="100" step="1" oninput="onClusterChange()">
+        <div class="range-row"><span id="cluster-strength-label">30</span></div>
+      </div>
+      <div class="filter-group">
         <button class="toggle-btn" id="hulls-btn" onclick="toggleFilter('hulls')">Section Clusters</button>
       </div>
       <div class="filter-group">
@@ -150,7 +163,7 @@ h3.section-title { font-size: 14px; font-weight: 600; color: #e2e8f0; margin-bot
       </div>
     </div>
     <div id="graph-canvas">
-      <svg id="graph-svg"></svg>
+      <div id="sigma-container"><canvas id="hull-canvas"></canvas></div>
       <div id="tooltip">
         <div class="t-title" id="tt-title"></div>
         <div class="t-url" id="tt-url"></div>
@@ -179,13 +192,20 @@ h3.section-title { font-size: 14px; font-weight: 600; color: #e2e8f0; margin-bot
     </div>
   </div>
   <div id="stats-view"></div>
+  <div id="links-view"></div>
 </div>
 
 <script>
 const GRAPH_DATA = ${graphJson};
 </script>
 <script>
-${d3Source}
+${graphologySource}
+</script>
+<script>
+${forceAtlas2Source}
+</script>
+<script>
+${sigmaSource}
 </script>
 <script>
 // --- State ---
@@ -196,18 +216,29 @@ const filters = {
   showOrphan: true,
   showDead: true,
   showHulls: true,
+  clusterStrength: 30,
 };
+
+// --- Color palette (Tableau10) ---
+const TABLEAU10 = ['#4e79a7','#f28e2c','#e15759','#76b7b2','#59a14f','#edc949','#af7aa1','#ff9da7','#9c755f','#bab0ab'];
+const sections = [...new Set(GRAPH_DATA.nodes.map(n => n.section))];
+const colorScale = (section) => TABLEAU10[sections.indexOf(section) % TABLEAU10.length];
+
+function colorWithOpacity(hex, opacity) {
+  const r = parseInt(hex.slice(1,3), 16);
+  const g = parseInt(hex.slice(3,5), 16);
+  const b = parseInt(hex.slice(5,7), 16);
+  return \`rgba(\${r},\${g},\${b},\${opacity})\`;
+}
 
 // --- Tab switcher ---
 function switchTab(tab) {
-  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', (i === 0) === (tab === 'graph')));
+  const tabs = ['graph', 'stats', 'links'];
+  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', tabs[i] === tab));
   document.getElementById('graph-view').style.display = tab === 'graph' ? 'flex' : 'none';
   document.getElementById('stats-view').style.display = tab === 'stats' ? 'block' : 'none';
+  document.getElementById('links-view').style.display = tab === 'links' ? 'block' : 'none';
 }
-
-// --- Color scale ---
-const sections = [...new Set(GRAPH_DATA.nodes.map(n => n.section))];
-const colorScale = d3.scaleOrdinal(d3.schemeTableau10).domain(sections);
 
 // --- Build filter sidebar ---
 function buildSidebar() {
@@ -239,6 +270,17 @@ function buildSidebar() {
   });
   filters.depthMax = maxDepth;
   document.getElementById('depth-max-label').textContent = maxDepth;
+
+  const clusterEl = document.getElementById('cluster-strength');
+  clusterEl.value = filters.clusterStrength;
+  document.getElementById('cluster-strength-label').textContent = filters.clusterStrength;
+}
+
+function onClusterChange() {
+  const el = document.getElementById('cluster-strength');
+  filters.clusterStrength = +el.value;
+  document.getElementById('cluster-strength-label').textContent = filters.clusterStrength;
+  refreshGraph();
 }
 
 function applyFilters() {
@@ -248,7 +290,7 @@ function applyFilters() {
   filters.depthMax = +maxEl.value;
   document.getElementById('depth-min-label').textContent = filters.depthMin;
   document.getElementById('depth-max-label').textContent = filters.depthMax;
-  updateGraph();
+  refreshGraph();
 }
 
 function toggleFilter(type) {
@@ -261,133 +303,10 @@ function toggleFilter(type) {
   } else if (type === 'hulls') {
     filters.showHulls = !filters.showHulls;
     document.getElementById('hulls-btn').classList.toggle('active', filters.showHulls);
-    updateHulls();
+    sigma.refresh();
     return;
   }
-  updateGraph();
-}
-
-// --- D3 Graph ---
-let simulation, nodeSelection, linkSelection, labelSelection, hullLayer, langLabelSelection, svgSelection, zoomBehavior;
-let selectedNodeId = null;
-let panelNode = null;
-let tickCounter = 0;
-
-function initGraph() {
-  svgSelection = d3.select('#graph-svg');
-  const svg = svgSelection;
-  const width = document.getElementById('graph-canvas').clientWidth;
-  const height = document.getElementById('graph-canvas').clientHeight;
-
-  svg.attr('viewBox', [0, 0, width, height]);
-
-  const g = svg.append('g');
-
-  zoomBehavior = d3.zoom().scaleExtent([0.05, 8]).on('zoom', (e) => g.attr('transform', e.transform));
-  svg.call(zoomBehavior);
-
-  const defs = svg.append('defs');
-  defs.append('marker')
-    .attr('id', 'arrow')
-    .attr('viewBox', '0 -5 10 10')
-    .attr('refX', 20)
-    .attr('refY', 0)
-    .attr('markerWidth', 6)
-    .attr('markerHeight', 6)
-    .attr('orient', 'auto')
-    .append('path')
-    .attr('d', 'M0,-5L10,0L0,5')
-    .attr('fill', '#3d4166');
-
-  hullLayer = g.append('g').attr('class', 'hulls');
-  linkSelection = g.append('g').attr('class', 'links').selectAll('line');
-  nodeSelection = g.append('g').attr('class', 'nodes').selectAll('circle');
-  labelSelection = g.append('g').attr('class', 'labels').selectAll('text');
-  langLabelSelection = g.append('g').attr('class', 'lang-labels').selectAll('text');
-
-  simulation = d3.forceSimulation()
-    .force('link', d3.forceLink().id(d => d.id).distance(60).strength(0.5))
-    .force('charge', d3.forceManyBody().strength(-120))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 4));
-
-  simulation.on('tick', () => {
-    linkSelection
-      .attr('x1', d => d.source.x)
-      .attr('y1', d => d.source.y)
-      .attr('x2', d => d.target.x)
-      .attr('y2', d => d.target.y);
-
-    nodeSelection
-      .attr('cx', d => d.x)
-      .attr('cy', d => d.y);
-
-    labelSelection
-      .attr('x', d => d.x)
-      .attr('y', d => d.y + nodeRadius(d) + 11);
-
-    langLabelSelection
-      .attr('x', d => d.x)
-      .attr('y', d => d.y + nodeRadius(d) + 20);
-
-    tickCounter++;
-    if (tickCounter % 3 === 0) updateHulls();
-  });
-
-  updateGraph();
-}
-
-function nodeRadius(d) {
-  return Math.max(5, Math.min(20, 5 + d.inbound * 0.8));
-}
-
-function colorWithOpacity(hex, opacity) {
-  const c = d3.color(hex);
-  return \`rgba(\${c.r},\${c.g},\${c.b},\${opacity})\`;
-}
-
-function updateHulls() {
-  if (!hullLayer) return;
-  if (!filters.showHulls) {
-    hullLayer.style('display', 'none');
-    return;
-  }
-  hullLayer.style('display', null);
-
-  const visibleNodes = GRAPH_DATA.nodes.filter(n => isVisible(n) && n.x !== undefined);
-  const bySection = d3.group(visibleNodes, n => n.section);
-
-  const sectionData = Array.from(bySection.entries()).map(([section, nodes]) => ({
-    section, nodes, color: colorScale(section)
-  }));
-
-  const paths = hullLayer.selectAll('path').data(sectionData, d => d.section);
-  paths.exit().remove();
-  paths.enter().append('path').merge(paths)
-    .attr('fill', d => colorWithOpacity(d.color, 0.08))
-    .attr('stroke', d => colorWithOpacity(d.color, 0.30))
-    .attr('stroke-width', 1.5)
-    .attr('stroke-dasharray', '4,3')
-    .attr('pointer-events', 'none')
-    .attr('d', d => {
-      const pts = d.nodes.map(n => [n.x, n.y]);
-      if (pts.length === 1) {
-        const r = nodeRadius(d.nodes[0]) + 12;
-        const [cx, cy] = pts[0];
-        return \`M \${cx - r},\${cy} a \${r},\${r} 0 1,0 \${r * 2},0 a \${r},\${r} 0 1,0 \${-r * 2},0\`;
-      }
-      if (pts.length === 2) {
-        const dx = pts[1][0] - pts[0][0];
-        const dy = pts[1][1] - pts[0][1];
-        const r = Math.sqrt(dx * dx + dy * dy) / 2 + nodeRadius(d.nodes[0]) + 12;
-        const cx = (pts[0][0] + pts[1][0]) / 2;
-        const cy = (pts[0][1] + pts[1][1]) / 2;
-        return \`M \${cx - r},\${cy} a \${r},\${r} 0 1,0 \${r * 2},0 a \${r},\${r} 0 1,0 \${-r * 2},0\`;
-      }
-      const hull = d3.polygonHull(pts);
-      if (!hull) return '';
-      return 'M' + hull.map(p => p.join(',')).join('L') + 'Z';
-    });
+  refreshGraph();
 }
 
 function isVisible(n) {
@@ -398,73 +317,328 @@ function isVisible(n) {
     && (filters.showDead || !n.dead);
 }
 
-function updateGraph() {
-  const visibleIds = new Set(GRAPH_DATA.nodes.filter(isVisible).map(n => n.id));
-  const visibleNodes = GRAPH_DATA.nodes.filter(n => visibleIds.has(n.id));
-  const visibleEdges = GRAPH_DATA.edges.filter(e => visibleIds.has(e.source.id || e.source) && visibleIds.has(e.target.id || e.target));
+function applyClustering(baseline, strength) {
+  const visibleNodes = GRAPH_DATA.nodes.filter(n => isVisible(n));
+  const bySection = {};
+  visibleNodes.forEach(n => {
+    if (!bySection[n.section]) bySection[n.section] = [];
+    bySection[n.section].push(n.id);
+  });
 
-  // Rebuild links
-  linkSelection = linkSelection.data(visibleEdges, d => \`\${d.source}-\${d.target}\`);
-  linkSelection.exit().remove();
-  linkSelection = linkSelection.enter().append('line')
-    .attr('stroke', '#2d3148')
-    .attr('stroke-width', 0.8)
-    .attr('marker-end', 'url(#arrow)')
-    .merge(linkSelection);
+  const positions = {};
+  for (const [id, pos] of Object.entries(baseline)) {
+    positions[id] = { x: pos.x, y: pos.y };
+  }
 
-  // Rebuild nodes
-  nodeSelection = nodeSelection.data(visibleNodes, d => d.id);
-  nodeSelection.exit().remove();
-  const nodeEnter = nodeSelection.enter().append('circle')
-    .call(d3.drag()
-      .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
-      .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
-    )
-    .on('mouseover', showTooltip)
-    .on('mousemove', moveTooltip)
-    .on('mouseout', hideTooltip)
-    .on('click', (e, d) => { e.stopPropagation(); selectedNodeId === d.id ? closePanel() : openPanel(d); });
+  for (let iter = 0; iter < 30; iter++) {
+    const centroids = {};
+    for (const [section, nodeIds] of Object.entries(bySection)) {
+      let cx = 0, cy = 0;
+      for (const id of nodeIds) {
+        cx += positions[id].x;
+        cy += positions[id].y;
+      }
+      centroids[section] = { x: cx / nodeIds.length, y: cy / nodeIds.length };
+    }
+    for (const [section, nodeIds] of Object.entries(bySection)) {
+      const c = centroids[section];
+      for (const id of nodeIds) {
+        const p = positions[id];
+        p.x += strength * (c.x - p.x);
+        p.y += strength * (c.y - p.y);
+      }
+    }
+  }
 
-  nodeSelection = nodeEnter.merge(nodeSelection)
-    .attr('r', nodeRadius)
-    .attr('fill', d => d.dead ? '#ef4444' : colorScale(d.section))
-    .attr('opacity', d => d.orphan ? 0.35 : 0.9)
-    .attr('stroke', d => selectedNodeId === d.id ? '#ffffff' : (d.dead ? '#dc2626' : 'rgba(255,255,255,0.15)'))
-    .attr('stroke-width', d => selectedNodeId === d.id ? 2 : 1)
-    .style('cursor', 'pointer');
+  for (const n of visibleNodes) {
+    const p = positions[n.id];
+    graph.setNodeAttribute(n.id, 'x', p.x);
+    graph.setNodeAttribute(n.id, 'y', p.y);
+  }
+}
 
-  // Labels (only for low-node-count views)
-  labelSelection = labelSelection.data(visibleNodes.length < 80 ? visibleNodes : [], d => d.id);
-  labelSelection.exit().remove();
-  labelSelection = labelSelection.enter().append('text')
-    .attr('text-anchor', 'middle')
-    .attr('font-size', 9)
-    .attr('fill', '#64748b')
-    .attr('pointer-events', 'none')
-    .text(d => {
-      const path = new URL(d.url).pathname;
-      const parts = path.split('/').filter(Boolean);
-      return parts[parts.length - 1] || '/';
-    })
-    .merge(labelSelection);
+// --- Convex hull (Graham scan) ---
+function cross(o, a, b) {
+  return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+}
+function convexHull(points) {
+  if (points.length < 3) return null;
+  const pts = points.slice().sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
+  const lower = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
 
-  // Lang badges — only when multilingual
-  const langNodes = GRAPH_DATA.stats.isMultilingual ? visibleNodes : [];
-  langLabelSelection = langLabelSelection.data(langNodes, d => d.id);
-  langLabelSelection.exit().remove();
-  langLabelSelection = langLabelSelection.enter().append('text')
-    .attr('text-anchor', 'middle')
-    .attr('font-size', 8)
-    .attr('fill', '#94a3b8')
-    .attr('pointer-events', 'none')
-    .text(d => d.lang !== 'default' ? d.lang : '')
-    .merge(langLabelSelection);
+// --- Graph setup ---
+const nodeById = new Map(GRAPH_DATA.nodes.map(n => [n.id, n]));
+const edgesFrom = new Map(GRAPH_DATA.nodes.map(n => [n.id, []]));
+const edgesTo = new Map(GRAPH_DATA.nodes.map(n => [n.id, []]));
+GRAPH_DATA.edges.forEach(e => {
+  if (edgesFrom.has(e.source)) edgesFrom.get(e.source).push(e.target);
+  if (edgesTo.has(e.target)) edgesTo.get(e.target).push(e.source);
+});
 
-  simulation.nodes(visibleNodes);
-  simulation.force('link').links(visibleEdges);
-  simulation.alpha(0.3).restart();
-  updateHulls();
+const neighborMap = new Map(GRAPH_DATA.nodes.map(n => [n.id, new Set()]));
+GRAPH_DATA.edges.forEach(e => {
+  if (neighborMap.has(e.source)) neighborMap.get(e.source).add(e.target);
+  if (neighborMap.has(e.target)) neighborMap.get(e.target).add(e.source);
+});
+
+function getPathLabel(url) {
+  try {
+    const path = new URL(url).pathname;
+    const parts = path.split('/').filter(Boolean);
+    return parts[parts.length - 1] || '/';
+  } catch {
+    return url;
+  }
+}
+
+const Graph = graphology.Graph;
+const graph = new Graph();
+
+GRAPH_DATA.nodes.forEach(n => {
+  graph.addNode(n.id, {
+    x: Math.random() * 100,
+    y: Math.random() * 100,
+    size: Math.max(5, Math.min(20, 5 + n.inbound * 0.8)),
+    color: colorScale(n.section),
+    label: GRAPH_DATA.stats.isMultilingual && n.lang !== 'default'
+      ? getPathLabel(n.url) + ' (' + n.lang + ')'
+      : getPathLabel(n.url),
+    lang: n.lang,
+    depth: n.depth,
+    section: n.section,
+    orphan: n.orphan,
+    dead: n.dead,
+    status: n.status,
+    title: n.title,
+    url: n.url,
+    inbound: n.inbound,
+    outbound: n.outbound,
+  });
+});
+
+GRAPH_DATA.edges.forEach(e => {
+  if (graph.hasNode(e.source) && graph.hasNode(e.target)) {
+    graph.addEdge(e.source, e.target, { size: 0.8 });
+  }
+});
+
+// --- Layout ---
+forceAtlas2(graph, {
+  iterations: 300,
+  settings: {
+    gravity: 1,
+    scalingRatio: 2,
+    strongGravityMode: true,
+    slowDown: 2,
+  },
+});
+
+// Store baseline positions for deterministic re-clustering
+const baselinePositions = {};
+GRAPH_DATA.nodes.forEach(n => {
+  baselinePositions[n.id] = {
+    x: graph.getNodeAttribute(n.id, 'x'),
+    y: graph.getNodeAttribute(n.id, 'y'),
+  };
+});
+
+// --- Sigma ---
+const container = document.getElementById('sigma-container');
+const sigma = new Sigma(graph, container, {
+  renderLabels: true,
+  labelSize: 9,
+  labelColor: { color: '#64748b' },
+  labelDensity: 0,
+  labelGridCellSize: 0,
+  labelRenderedSizeThreshold: 0,
+  zIndex: true,
+  defaultNodeColor: '#999',
+  defaultEdgeColor: '#2d3148',
+  edgeColor: 'default',
+});
+
+let selectedNodeId = null;
+let panelNode = null;
+let hoveredNodeId = null;
+
+sigma.setSetting('nodeReducer', (node, data) => {
+  if (!isVisible(data)) return { ...data, hidden: true };
+  const isSelected = node === selectedNodeId;
+  const isHovered = node === hoveredNodeId;
+  const neighbors = hoveredNodeId ? neighborMap.get(hoveredNodeId) : null;
+  const isNeighbor = neighbors ? neighbors.has(node) : false;
+  let opacity = data.orphan ? 0.35 : 0.9;
+  if (hoveredNodeId && node !== hoveredNodeId && !isNeighbor) {
+    opacity = 0.15;
+  }
+  return {
+    ...data,
+    color: data.dead ? '#ef4444' : colorScale(data.section),
+    zIndex: data.dead ? 2 : (data.orphan ? 0 : 1),
+    highlighted: isSelected || isHovered,
+    borderColor: isSelected ? '#ffffff' : (data.dead ? '#dc2626' : 'rgba(255,255,255,0.15)'),
+    borderSize: isSelected ? 2 : 1,
+    opacity,
+  };
+});
+
+sigma.setSetting('edgeReducer', (edge, data) => {
+  const source = graph.source(edge);
+  const target = graph.target(edge);
+  const sourceData = graph.getNodeAttributes(source);
+  const targetData = graph.getNodeAttributes(target);
+  if (!isVisible(sourceData) || !isVisible(targetData)) return { ...data, hidden: true };
+  const isHighlighted = hoveredNodeId && (source === hoveredNodeId || target === hoveredNodeId);
+  return {
+    ...data,
+    color: isHighlighted ? '#a78bfa' : '#2d3148',
+    opacity: hoveredNodeId && !isHighlighted ? 0.1 : 1,
+  };
+});
+
+// --- Events ---
+sigma.on('clickNode', ({ node, event }) => {
+  event.original.stopPropagation();
+  if (selectedNodeId === node) {
+    closePanel();
+  } else {
+    openPanel(nodeById.get(node));
+  }
+});
+sigma.on('clickStage', () => closePanel());
+
+sigma.on('enterNode', ({ node, event }) => {
+  hoveredNodeId = node;
+  showTooltip(event, nodeById.get(node));
+  sigma.refresh();
+});
+
+sigma.on('leaveNode', () => {
+  hoveredNodeId = null;
+  hideTooltip();
+  sigma.refresh();
+});
+
+// --- Drag ---
+let draggedNode = null;
+let dragging = false;
+sigma.on('downNode', ({ node }) => {
+  draggedNode = node;
+  dragging = true;
+  sigma.getCamera().disable();
+});
+sigma.on('moveBody', ({ event }) => {
+  if (!dragging || !draggedNode) return;
+  const pos = sigma.viewportToGraph({ x: event.x, y: event.y });
+  graph.setNodeAttribute(draggedNode, 'x', pos.x);
+  graph.setNodeAttribute(draggedNode, 'y', pos.y);
+  sigma.refresh();
+});
+sigma.on('upStage', () => {
+  if (dragging) {
+    dragging = false;
+    draggedNode = null;
+    sigma.getCamera().enable();
+  }
+});
+sigma.on('upNode', () => {
+  if (dragging) {
+    dragging = false;
+    draggedNode = null;
+    sigma.getCamera().enable();
+  }
+});
+
+// --- Hulls ---
+const hullCanvas = document.getElementById('hull-canvas');
+const hullCtx = hullCanvas.getContext('2d');
+function resizeHullCanvas() {
+  const rect = container.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  hullCanvas.width = rect.width * dpr;
+  hullCanvas.height = rect.height * dpr;
+  hullCanvas.style.width = rect.width + 'px';
+  hullCanvas.style.height = rect.height + 'px';
+  hullCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+resizeHullCanvas();
+window.addEventListener('resize', () => { resizeHullCanvas(); sigma.refresh(); });
+
+sigma.on('afterRender', () => {
+  if (!filters.showHulls) {
+    hullCtx.clearRect(0, 0, hullCanvas.width, hullCanvas.height);
+    return;
+  }
+  hullCtx.clearRect(0, 0, hullCanvas.width, hullCanvas.height);
+  const visibleNodes = GRAPH_DATA.nodes.filter(n => isVisible(n));
+  const bySection = {};
+  visibleNodes.forEach(n => {
+    if (!bySection[n.section]) bySection[n.section] = [];
+    const x = graph.getNodeAttribute(n.id, 'x');
+    const y = graph.getNodeAttribute(n.id, 'y');
+    bySection[n.section].push({ id: n.id, x, y, size: graph.getNodeAttribute(n.id, 'size') });
+  });
+
+  Object.entries(bySection).forEach(([section, nodes]) => {
+    if (nodes.length === 0) return;
+    const color = colorScale(section);
+    hullCtx.fillStyle = colorWithOpacity(color, 0.08);
+    hullCtx.strokeStyle = colorWithOpacity(color, 0.30);
+    hullCtx.setLineDash([4, 3]);
+    hullCtx.lineWidth = 1.5;
+
+    if (nodes.length === 1) {
+      const pos = sigma.graphToViewport(nodes[0]);
+      const r = nodes[0].size + 12;
+      hullCtx.beginPath();
+      hullCtx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+      hullCtx.fill();
+      hullCtx.stroke();
+    } else if (nodes.length === 2) {
+      const p1 = sigma.graphToViewport(nodes[0]);
+      const p2 = sigma.graphToViewport(nodes[1]);
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const r = Math.sqrt(dx*dx + dy*dy) / 2 + nodes[0].size + 12;
+      const cx = (p1.x + p2.x) / 2;
+      const cy = (p1.y + p2.y) / 2;
+      hullCtx.beginPath();
+      hullCtx.arc(cx, cy, r, 0, Math.PI * 2);
+      hullCtx.fill();
+      hullCtx.stroke();
+    } else {
+      const pts = nodes.map(n => sigma.graphToViewport(n));
+      const hull = convexHull(pts);
+      if (!hull || hull.length < 3) return;
+      hullCtx.beginPath();
+      hullCtx.moveTo(hull[0].x, hull[0].y);
+      for (let i = 1; i < hull.length; i++) {
+        hullCtx.lineTo(hull[i].x, hull[i].y);
+      }
+      hullCtx.closePath();
+      hullCtx.fill();
+      hullCtx.stroke();
+    }
+  });
+});
+
+function refreshGraph() {
+  applyClustering(baselinePositions, filters.clusterStrength / 100);
+  sigma.refresh();
 }
 
 // --- Tooltip ---
@@ -480,8 +654,8 @@ function showTooltip(e, d) {
   moveTooltip(e);
 }
 function moveTooltip(e) {
-  const x = e.offsetX + 14;
-  const y = e.offsetY - 10;
+  const x = (e.x || e.original?.offsetX || 0) + 14;
+  const y = (e.y || e.original?.offsetY || 0) - 10;
   tooltip.style.left = x + 'px';
   tooltip.style.top = y + 'px';
 }
@@ -526,6 +700,9 @@ function buildTable(headers, rows, id) {
 }
 
 const sortState = {};
+function initSortable(id, rows) {
+  // No-op: sort state is lazily initialized in sortTable
+}
 function sortTable(id, colIdx) {
   const table = document.getElementById(id);
   if (!table) return;
@@ -549,15 +726,6 @@ function sortTable(id, colIdx) {
   rows.forEach(r => tbody.appendChild(r));
 }
 
-// --- Adjacency Index ---
-const nodeById = new Map(GRAPH_DATA.nodes.map(n => [n.id, n]));
-const edgesFrom = new Map(GRAPH_DATA.nodes.map(n => [n.id, []]));
-const edgesTo = new Map(GRAPH_DATA.nodes.map(n => [n.id, []]));
-GRAPH_DATA.edges.forEach(e => {
-  if (edgesFrom.has(e.source)) edgesFrom.get(e.source).push(e.target);
-  if (edgesTo.has(e.target)) edgesTo.get(e.target).push(e.source);
-});
-
 function getSourceNodes(nodeId) {
   return (edgesFrom.get(nodeId) || []).map(id => nodeById.get(id)).filter(Boolean);
 }
@@ -576,7 +744,7 @@ function openPanel(node) {
   renderSources(node.id);
   renderBacklinks(node.id);
   document.getElementById('detail-panel').classList.add('open');
-  updateGraph();
+  sigma.refresh();
 }
 
 function renderNodeList(container, nodes, cap) {
@@ -629,7 +797,7 @@ function closePanel() {
   document.getElementById('detail-panel').classList.remove('open');
   panelNode = null;
   selectedNodeId = null;
-  updateGraph();
+  sigma.refresh();
 }
 
 function visitPage() {
@@ -640,20 +808,28 @@ function focusNode(id) {
   const node = nodeById.get(id);
   if (!node) return;
   openPanel(node);
-  if (node.x !== undefined && svgSelection && zoomBehavior) {
-    const canvas = document.getElementById('graph-canvas');
-    const scale = 1.5;
-    svgSelection.transition().duration(500).call(
-      zoomBehavior.transform,
-      d3.zoomIdentity.translate(canvas.clientWidth / 2 - node.x * scale, canvas.clientHeight / 2 - node.y * scale).scale(scale)
-    );
+  const nodeX = graph.getNodeAttribute(id, 'x');
+  const nodeY = graph.getNodeAttribute(id, 'y');
+  if (nodeX !== undefined) {
+    sigma.getCamera().animate({ x: nodeX, y: nodeY, ratio: 0.5 }, { duration: 500 });
   }
+}
+
+// --- Links view ---
+function buildLinks() {
+  const view = document.getElementById('links-view');
+  const rows = GRAPH_DATA.nodes.map(n => [n.url, n.title || '(no title)', n.section, n.status || 'timeout', n.depth, n.inbound, n.outbound]);
+  view.innerHTML = \`
+    <h3 class="section-title">All Pages <span style="color:#64748b;font-weight:normal">(\${rows.length})</span></h3>
+    \${buildTable(['URL', 'Title', 'Section', 'Status', 'Depth', 'In', 'Out'], rows, 'links-table')}
+  \`;
+  initSortable('links-table', rows);
 }
 
 // --- Init ---
 buildSidebar();
-initGraph();
 buildStats();
+buildLinks();
 
 // set initial btn states
 document.getElementById('hulls-btn').classList.add('active');
@@ -662,7 +838,7 @@ document.getElementById('dead-btn').classList.add('active');
 
 // Dismissal
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closePanel(); });
-document.getElementById('graph-canvas').addEventListener('click', () => closePanel());
+// Canvas click handled by clickStage event
 </script>
 </body>
 </html>`

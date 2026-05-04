@@ -5,6 +5,8 @@ export interface ScanOptions {
   limit: number
   noRobots: boolean
   keepQuery: boolean
+  noFilterNav: boolean
+  navThreshold: number
 }
 
 export interface CrawlRecord {

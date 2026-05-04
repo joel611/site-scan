@@ -14,11 +14,15 @@ The graph builder SHALL construct a directed graph where each node is a crawled 
 - **THEN** graph contains directed edge A → B
 
 ### Requirement: Node metrics
-Each node SHALL include: url, title, status, depth, section (first non-empty path segment, or `/` for root), inbound link count, outbound link count.
+Each node SHALL include: url, title, status, depth, section (first non-empty path segment, or `/` for root, with parent-aware override for flat URLs), inbound link count, outbound link count.
 
-#### Scenario: Section assignment
+#### Scenario: Section assignment for hierarchical URL
 - **WHEN** page URL is `https://example.com/blog/my-post`
 - **THEN** node section is `blog`
+
+#### Scenario: Section assignment for flat URL linked from parent section
+- **WHEN** page URL is `https://example.com/20210319-recruit` and the only inbound links are from pages in section `media-coverage`
+- **THEN** node section is `media-coverage`
 
 #### Scenario: Root section
 - **WHEN** page URL is `https://example.com/`
@@ -82,8 +86,12 @@ The graph builder SHALL compute `isMultilingual` as `true` when more than one di
 - **THEN** `isMultilingual` is `false`
 
 ### Requirement: Site-level stats
-The graph builder SHALL compute aggregate stats: total pages, total edges, total sections, total unique templates, orphan count, dead link count, max depth.
+The graph builder SHALL compute aggregate stats: total pages, total edges, total sections, total unique templates, orphan count, dead link count, max depth. All stats SHALL reflect the post-filtered edge set (after high-in-degree edge removal).
 
 #### Scenario: Stats computed
 - **WHEN** crawl completes with 247 pages
 - **THEN** stats object contains all aggregate fields with correct values
+
+#### Scenario: Edge count reflects filtering
+- **WHEN** high-in-degree edge filter removes 500 edges
+- **THEN** `totalEdges` in stats equals the count AFTER removal

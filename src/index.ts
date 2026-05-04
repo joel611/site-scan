@@ -5,13 +5,15 @@ import { generateReport } from "./html-report"
 import type { ScanOptions } from "./types"
 
 function printUsage() {
-  console.error("Usage: site-scan <domain> [--depth N] [--limit N] [--no-robots] [--keep-query]")
+  console.error("Usage: site-scan <domain> [--depth N] [--limit N] [--no-robots] [--keep-query] [--no-filter-nav] [--nav-threshold N]")
   console.error("")
-  console.error("  domain        Domain to scan (e.g. example.com or https://example.com)")
-  console.error("  --depth N     Max crawl depth (default: unlimited)")
-  console.error("  --limit N     Max pages to crawl (default: 1000)")
-  console.error("  --no-robots   Ignore robots.txt restrictions")
-  console.error("  --keep-query  Treat URLs with different query strings as distinct")
+  console.error("  domain              Domain to scan (e.g. example.com or https://example.com)")
+  console.error("  --depth N           Max crawl depth (default: unlimited)")
+  console.error("  --limit N           Max pages to crawl (default: 1000)")
+  console.error("  --no-robots         Ignore robots.txt restrictions")
+  console.error("  --keep-query        Treat URLs with different query strings as distinct")
+  console.error("  --no-filter-nav     Include links from <header>, <footer>, and <nav> elements")
+  console.error("  --nav-threshold N   Remove edges to nodes linked from >N% of pages (default: 50, 0=off)")
   process.exit(1)
 }
 
@@ -35,6 +37,8 @@ function parseArgs(): ScanOptions {
   let limit = 1000
   let noRobots = false
   let keepQuery = false
+  let noFilterNav = false
+  let navThreshold = 50
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--depth" && args[i + 1]) {
@@ -53,6 +57,14 @@ function parseArgs(): ScanOptions {
       noRobots = true
     } else if (args[i] === "--keep-query") {
       keepQuery = true
+    } else if (args[i] === "--no-filter-nav") {
+      noFilterNav = true
+    } else if (args[i] === "--nav-threshold" && args[i + 1]) {
+      navThreshold = parseInt(args[++i] ?? "", 10)
+      if (isNaN(navThreshold) || navThreshold < 0 || navThreshold > 100) {
+        console.error("Error: --nav-threshold must be an integer between 0 and 100")
+        process.exit(1)
+      }
     } else {
       console.error(`Error: Unknown argument: ${args[i] ?? ""}`)
 
@@ -63,7 +75,7 @@ function parseArgs(): ScanOptions {
   const startUrl = parseDomain(domainArg)
   const domain = new URL(startUrl).hostname
 
-  return { domain, startUrl, depth, limit, noRobots, keepQuery }
+  return { domain, startUrl, depth, limit, noRobots, keepQuery, noFilterNav, navThreshold }
 }
 
 async function main() {
@@ -74,10 +86,13 @@ async function main() {
   console.log(`  Max pages: ${options.limit}`)
   if (options.noRobots) console.log("  robots.txt: ignored")
   if (options.keepQuery) console.log("  Query strings: preserved")
+  if (options.noFilterNav) console.log("  Nav filter: disabled")
+  if (options.navThreshold > 0) console.log(`  Hub edge threshold: ${options.navThreshold}%`)
+  else console.log("  Hub edge filter: disabled")
   console.log("")
 
   const records = await crawl(options)
-  const graph = buildGraph(records, options.startUrl)
+  const graph = buildGraph(records, options.startUrl, options.navThreshold)
   await generateReport(graph, options)
 
   const outputFile = `${options.domain.replace(/\./g, "-")}-scan.html`
