@@ -23,6 +23,7 @@ export interface GraphNode {
   status: number
   depth: number
   section: string
+  lang: string
   pattern: string
   inbound: number
   outbound: number
@@ -45,6 +46,13 @@ export interface GraphStats {
   maxDepth: number
   sectionBreakdown: SectionStat[]
   templateBreakdown: TemplateStat[]
+  langBreakdown: LangStat[]
+  isMultilingual: boolean
+}
+
+export interface LangStat {
+  lang: string
+  pageCount: number
 }
 
 export interface SectionStat {

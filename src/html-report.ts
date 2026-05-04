@@ -140,6 +140,9 @@ h3.section-title { font-size: 14px; font-weight: 600; color: #e2e8f0; margin-bot
         <div class="range-row"><span id="depth-min-label">0</span><span id="depth-max-label">10</span></div>
       </div>
       <div class="filter-group">
+        <button class="toggle-btn" id="hulls-btn" onclick="toggleFilter('hulls')">Section Clusters</button>
+      </div>
+      <div class="filter-group">
         <button class="toggle-btn" id="orphan-btn" onclick="toggleFilter('orphan')">Show Orphans</button>
       </div>
       <div class="filter-group">
@@ -192,6 +195,7 @@ const filters = {
   depthMax: Infinity,
   showOrphan: true,
   showDead: true,
+  showHulls: true,
 };
 
 // --- Tab switcher ---
@@ -251,17 +255,23 @@ function toggleFilter(type) {
   if (type === 'orphan') {
     filters.showOrphan = !filters.showOrphan;
     document.getElementById('orphan-btn').classList.toggle('active', filters.showOrphan);
-  } else {
+  } else if (type === 'dead') {
     filters.showDead = !filters.showDead;
     document.getElementById('dead-btn').classList.toggle('active', filters.showDead);
+  } else if (type === 'hulls') {
+    filters.showHulls = !filters.showHulls;
+    document.getElementById('hulls-btn').classList.toggle('active', filters.showHulls);
+    updateHulls();
+    return;
   }
   updateGraph();
 }
 
 // --- D3 Graph ---
-let simulation, nodeSelection, linkSelection, labelSelection, svgSelection, zoomBehavior;
+let simulation, nodeSelection, linkSelection, labelSelection, hullLayer, langLabelSelection, svgSelection, zoomBehavior;
 let selectedNodeId = null;
 let panelNode = null;
+let tickCounter = 0;
 
 function initGraph() {
   svgSelection = d3.select('#graph-svg');
@@ -289,9 +299,11 @@ function initGraph() {
     .attr('d', 'M0,-5L10,0L0,5')
     .attr('fill', '#3d4166');
 
+  hullLayer = g.append('g').attr('class', 'hulls');
   linkSelection = g.append('g').attr('class', 'links').selectAll('line');
   nodeSelection = g.append('g').attr('class', 'nodes').selectAll('circle');
   labelSelection = g.append('g').attr('class', 'labels').selectAll('text');
+  langLabelSelection = g.append('g').attr('class', 'lang-labels').selectAll('text');
 
   simulation = d3.forceSimulation()
     .force('link', d3.forceLink().id(d => d.id).distance(60).strength(0.5))
@@ -313,6 +325,13 @@ function initGraph() {
     labelSelection
       .attr('x', d => d.x)
       .attr('y', d => d.y + nodeRadius(d) + 11);
+
+    langLabelSelection
+      .attr('x', d => d.x)
+      .attr('y', d => d.y + nodeRadius(d) + 20);
+
+    tickCounter++;
+    if (tickCounter % 3 === 0) updateHulls();
   });
 
   updateGraph();
@@ -320,6 +339,55 @@ function initGraph() {
 
 function nodeRadius(d) {
   return Math.max(5, Math.min(20, 5 + d.inbound * 0.8));
+}
+
+function colorWithOpacity(hex, opacity) {
+  const c = d3.color(hex);
+  return \`rgba(\${c.r},\${c.g},\${c.b},\${opacity})\`;
+}
+
+function updateHulls() {
+  if (!hullLayer) return;
+  if (!filters.showHulls) {
+    hullLayer.style('display', 'none');
+    return;
+  }
+  hullLayer.style('display', null);
+
+  const visibleNodes = GRAPH_DATA.nodes.filter(n => isVisible(n) && n.x !== undefined);
+  const bySection = d3.group(visibleNodes, n => n.section);
+
+  const sectionData = Array.from(bySection.entries()).map(([section, nodes]) => ({
+    section, nodes, color: colorScale(section)
+  }));
+
+  const paths = hullLayer.selectAll('path').data(sectionData, d => d.section);
+  paths.exit().remove();
+  paths.enter().append('path').merge(paths)
+    .attr('fill', d => colorWithOpacity(d.color, 0.08))
+    .attr('stroke', d => colorWithOpacity(d.color, 0.30))
+    .attr('stroke-width', 1.5)
+    .attr('stroke-dasharray', '4,3')
+    .attr('pointer-events', 'none')
+    .attr('d', d => {
+      const pts = d.nodes.map(n => [n.x, n.y]);
+      if (pts.length === 1) {
+        const r = nodeRadius(d.nodes[0]) + 12;
+        const [cx, cy] = pts[0];
+        return \`M \${cx - r},\${cy} a \${r},\${r} 0 1,0 \${r * 2},0 a \${r},\${r} 0 1,0 \${-r * 2},0\`;
+      }
+      if (pts.length === 2) {
+        const dx = pts[1][0] - pts[0][0];
+        const dy = pts[1][1] - pts[0][1];
+        const r = Math.sqrt(dx * dx + dy * dy) / 2 + nodeRadius(d.nodes[0]) + 12;
+        const cx = (pts[0][0] + pts[1][0]) / 2;
+        const cy = (pts[0][1] + pts[1][1]) / 2;
+        return \`M \${cx - r},\${cy} a \${r},\${r} 0 1,0 \${r * 2},0 a \${r},\${r} 0 1,0 \${-r * 2},0\`;
+      }
+      const hull = d3.polygonHull(pts);
+      if (!hull) return '';
+      return 'M' + hull.map(p => p.join(',')).join('L') + 'Z';
+    });
 }
 
 function isVisible(n) {
@@ -381,9 +449,22 @@ function updateGraph() {
     })
     .merge(labelSelection);
 
+  // Lang badges — only when multilingual
+  const langNodes = GRAPH_DATA.stats.isMultilingual ? visibleNodes : [];
+  langLabelSelection = langLabelSelection.data(langNodes, d => d.id);
+  langLabelSelection.exit().remove();
+  langLabelSelection = langLabelSelection.enter().append('text')
+    .attr('text-anchor', 'middle')
+    .attr('font-size', 8)
+    .attr('fill', '#94a3b8')
+    .attr('pointer-events', 'none')
+    .text(d => d.lang !== 'default' ? d.lang : '')
+    .merge(langLabelSelection);
+
   simulation.nodes(visibleNodes);
   simulation.force('link').links(visibleEdges);
   simulation.alpha(0.3).restart();
+  updateHulls();
 }
 
 // --- Tooltip ---
@@ -420,12 +501,18 @@ function buildStats() {
     ['Max Depth', stats.maxDepth],
   ];
 
+  const langTableHtml = stats.isMultilingual ? \`
+    <h3 class="section-title" style="margin-top:24px">Language Breakdown</h3>
+    \${buildTable(['Language', 'Pages'], stats.langBreakdown.map(r => [r.lang, r.pageCount]), 'lang-table')}
+  \` : '';
+
   view.innerHTML = \`
     <div class="cards">\${cards.map(([l, v]) => \`<div class="card"><div class="c-label">\${l}</div><div class="c-val">\${v}</div></div>\`).join('')}</div>
     <h3 class="section-title">Section Breakdown</h3>
     \${buildTable(['Section', 'Pages', 'Templates'], stats.sectionBreakdown.map(r => [r.section, r.pageCount, r.templateCount]), 'section-table')}
     <h3 class="section-title" style="margin-top:24px">Template Breakdown</h3>
     \${buildTable(['Pattern', 'Pages', 'Section'], stats.templateBreakdown.map(r => [r.pattern, r.pageCount, r.section]), 'template-table')}
+    \${langTableHtml}
   \`;
 
   initSortable('section-table', stats.sectionBreakdown.map(r => [r.section, r.pageCount, r.templateCount]));
@@ -569,6 +656,7 @@ initGraph();
 buildStats();
 
 // set initial btn states
+document.getElementById('hulls-btn').classList.add('active');
 document.getElementById('orphan-btn').classList.add('active');
 document.getElementById('dead-btn').classList.add('active');
 

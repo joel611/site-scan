@@ -1,12 +1,19 @@
-import type { CrawlRecord, Graph, GraphEdge, GraphNode, GraphStats, SectionStat, TemplateStat } from "./types"
+import type { CrawlRecord, Graph, GraphEdge, GraphNode, GraphStats, LangStat, SectionStat, TemplateStat } from "./types"
 
-function getSection(url: string): string {
+const LANG_RE = /^[a-z]{2}(-[a-z]{2,4})?$/i
+
+function extractLangSection(url: string): { lang: string; section: string } {
   try {
     const { pathname } = new URL(url)
     const parts = pathname.split("/").filter(Boolean)
-    return parts.length > 0 ? (parts[0] ?? "/") : "/"
+    if (parts.length === 0) return { lang: "default", section: "/" }
+    const first = parts[0]!
+    if (LANG_RE.test(first)) {
+      return { lang: first.toLowerCase(), section: parts.length > 1 ? parts[1]! : "/" }
+    }
+    return { lang: "default", section: first }
   } catch {
-    return "/"
+    return { lang: "default", section: "/" }
   }
 }
 
@@ -36,13 +43,15 @@ export function buildGraph(records: CrawlRecord[], startUrl: string): Graph {
 
   for (const rec of records) {
     const url = rec.finalUrl || rec.url
+    const { lang, section } = extractLangSection(url)
     nodeMap.set(url, {
       id: url,
       url,
       title: rec.title,
       status: rec.status,
       depth: rec.depth,
-      section: getSection(url),
+      section,
+      lang,
       pattern: getPattern(url),
       inbound: 0,
       outbound: 0,
@@ -117,6 +126,16 @@ export function buildGraph(records: CrawlRecord[], startUrl: string): Graph {
     section,
   }))
 
+  const langPageMap = new Map<string, number>()
+  for (const node of nodes) {
+    langPageMap.set(node.lang, (langPageMap.get(node.lang) ?? 0) + 1)
+  }
+  const langBreakdown: LangStat[] = Array.from(langPageMap.entries())
+    .map(([lang, pageCount]) => ({ lang, pageCount }))
+    .sort((a, b) => b.pageCount - a.pageCount)
+  const distinctNonDefaultLangs = new Set(nodes.map(n => n.lang).filter(l => l !== "default"))
+  const isMultilingual = distinctNonDefaultLangs.size > 1
+
   const stats: GraphStats = {
     totalPages: nodes.length,
     totalEdges: edges.length,
@@ -127,6 +146,8 @@ export function buildGraph(records: CrawlRecord[], startUrl: string): Graph {
     maxDepth,
     sectionBreakdown,
     templateBreakdown,
+    langBreakdown,
+    isMultilingual,
   }
 
   return { nodes, edges, stats }
