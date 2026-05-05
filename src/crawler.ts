@@ -184,7 +184,7 @@ export async function crawl(options: ScanOptions): Promise<CrawlRecord[]> {
         } catch { /* skip malformed */ }
       }
 
-      records.push({ url: pageUrl, finalUrl: normalizedFinal, title, status, depth: pageDepth, outboundLinks })
+      records.push({ url: pageUrl, finalUrl: normalizedFinal, title, status, depth: pageDepth, outboundLinks, html })
 
       process.stdout.write(`\rCrawling... ${records.length} pages found, ${queue.length + nextQueue.length} queued`)
 

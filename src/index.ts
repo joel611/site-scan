@@ -5,7 +5,7 @@ import { generateReport } from "./html-report"
 import type { ScanOptions } from "./types"
 
 function printUsage() {
-  console.error("Usage: site-scan <domain> [--depth N] [--limit N] [--no-robots] [--keep-query] [--no-filter-nav] [--nav-threshold N]")
+  console.error("Usage: site-scan <domain> [--depth N] [--limit N] [--no-robots] [--keep-query] [--no-filter-nav] [--nav-threshold N] [--no-embeddings]")
   console.error("")
   console.error("  domain              Domain to scan (e.g. example.com or https://example.com)")
   console.error("  --depth N           Max crawl depth (default: unlimited)")
@@ -14,6 +14,7 @@ function printUsage() {
   console.error("  --keep-query        Treat URLs with different query strings as distinct")
   console.error("  --no-filter-nav     Include links from <header>, <footer>, and <nav> elements")
   console.error("  --nav-threshold N   Remove edges to nodes linked from >N% of pages (default: 50, 0=off)")
+  console.error("  --no-embeddings     Skip page embedding computation (subclusters will be null)")
   process.exit(1)
 }
 
@@ -39,6 +40,7 @@ function parseArgs(): ScanOptions {
   let keepQuery = false
   let noFilterNav = false
   let navThreshold = 50
+  let noEmbeddings = false
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--depth" && args[i + 1]) {
@@ -59,6 +61,8 @@ function parseArgs(): ScanOptions {
       keepQuery = true
     } else if (args[i] === "--no-filter-nav") {
       noFilterNav = true
+    } else if (args[i] === "--no-embeddings") {
+      noEmbeddings = true
     } else if (args[i] === "--nav-threshold" && args[i + 1]) {
       navThreshold = parseInt(args[++i] ?? "", 10)
       if (isNaN(navThreshold) || navThreshold < 0 || navThreshold > 100) {
@@ -75,7 +79,7 @@ function parseArgs(): ScanOptions {
   const startUrl = parseDomain(domainArg)
   const domain = new URL(startUrl).hostname
 
-  return { domain, startUrl, depth, limit, noRobots, keepQuery, noFilterNav, navThreshold }
+  return { domain, startUrl, depth, limit, noRobots, keepQuery, noFilterNav, navThreshold, noEmbeddings }
 }
 
 async function main() {
@@ -89,10 +93,11 @@ async function main() {
   if (options.noFilterNav) console.log("  Nav filter: disabled")
   if (options.navThreshold > 0) console.log(`  Hub edge threshold: ${options.navThreshold}%`)
   else console.log("  Hub edge filter: disabled")
+  if (options.noEmbeddings) console.log("  Embeddings: disabled (--no-embeddings)")
   console.log("")
 
   const records = await crawl(options)
-  const graph = buildGraph(records, options.startUrl, options.navThreshold)
+  const graph = await buildGraph(records, options.startUrl, options.navThreshold, options.noEmbeddings)
   await generateReport(graph, options)
 
   const outputFile = `${options.domain.replace(/\./g, "-")}-scan.html`

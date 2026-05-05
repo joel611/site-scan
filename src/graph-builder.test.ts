@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test"
-import { buildGraph, inferSectionFromInbound, extractBaseSection, filterHighIndegreeEdges } from "./graph-builder"
+import { buildGraph, inferSectionFromInbound, extractBaseSection, filterHighIndegreeEdges, extractPageText, runLeidenCommunityDetection, runHdbscanSubclustering } from "./graph-builder"
 import type { CrawlRecord, Graph, GraphNode, GraphEdge } from "./types"
 
 function makeNode(id: string, section: string): GraphNode {
@@ -16,6 +16,8 @@ function makeNode(id: string, section: string): GraphNode {
     outbound: 0,
     orphan: false,
     dead: false,
+    community: "c0",
+    subcluster: null,
   }
 }
 
@@ -96,7 +98,7 @@ test("inferSectionFromInbound - no inbound fallback", () => {
   expect(result.has("https://example.com/orphan")).toBe(false)
 })
 
-test("buildGraph - flat URL linked from parent section gets inferred section", () => {
+test("buildGraph - flat URL linked from parent section gets inferred section", async () => {
   const records: CrawlRecord[] = [
     {
       url: "https://example.com/",
@@ -132,13 +134,13 @@ test("buildGraph - flat URL linked from parent section gets inferred section", (
     },
   ]
 
-  const graph = buildGraph(records, "https://example.com/")
+  const graph = await buildGraph(records, "https://example.com/", 50, true)
   const recruit = graph.nodes.find((n) => n.url === "https://example.com/20210319-recruit")
   expect(recruit).toBeDefined()
   expect(recruit!.section).toBe("media-coverage")
 })
 
-test("buildGraph - hierarchical URL keeps path-based section", () => {
+test("buildGraph - hierarchical URL keeps path-based section", async () => {
   const records: CrawlRecord[] = [
     {
       url: "https://example.com/",
@@ -158,7 +160,7 @@ test("buildGraph - hierarchical URL keeps path-based section", () => {
     },
   ]
 
-  const graph = buildGraph(records, "https://example.com/")
+  const graph = await buildGraph(records, "https://example.com/", 50, true)
   const post = graph.nodes.find((n) => n.url === "https://example.com/blog/my-post")
   expect(post).toBeDefined()
   expect(post!.section).toBe("blog")
@@ -171,6 +173,7 @@ function makeFullNode(url: string, depth: number, inbound: number, outbound: num
     id: url, url, title: "", status: 200, depth,
     section: "test", lang: "default", pattern: "/test",
     inbound, outbound, orphan: false, dead: false,
+    community: "c0", subcluster: null,
   }
 }
 
@@ -268,5 +271,202 @@ describe("filterHighIndegreeEdges", () => {
     const graph = makeTestGraph()
     const result = filterHighIndegreeEdges(graph, 50)
     expect(result.stats.totalEdges).toBe(result.edges.length)
+  })
+})
+
+// ── extractPageText ─────────────────────────────────────────────────────────
+
+describe("extractPageText", () => {
+  test("4.5.1 extracts from <main>", () => {
+    const html = "<html><body><nav>nav</nav><main>Main content here</main></body></html>"
+    const text = extractPageText(html)
+    expect(text).toContain("Main content")
+    expect(text).not.toContain("nav")
+  })
+
+  test("4.5.2 extracts from <article> when no <main>", () => {
+    const html = "<html><body><article>Article text</article></body></html>"
+    const text = extractPageText(html)
+    expect(text).toContain("Article text")
+  })
+
+  test("4.5.3 fallback to <body> when no <main> or <article>", () => {
+    const html = "<html><body><p>Body content</p></body></html>"
+    const text = extractPageText(html)
+    expect(text).toContain("Body content")
+  })
+
+  test("4.5.4 empty HTML returns empty string", () => {
+    expect(extractPageText("")).toBe("")
+  })
+
+  test("4.5.5 strips scripts and styles", () => {
+    const html = "<html><body><script>var x=1</script><style>.a{}</style><p>Real text</p></body></html>"
+    const text = extractPageText(html)
+    expect(text).toContain("Real text")
+    expect(text).not.toContain("var x")
+    expect(text).not.toContain(".a{}")
+  })
+
+  test("4.5.6 truncates to ~512 tokens", () => {
+    const words = Array.from({ length: 1000 }, (_, i) => `word${i}`)
+    const html = `<html><body><main>${words.join(" ")}</main></body></html>`
+    const text = extractPageText(html)
+    expect(text.split(" ").length).toBeLessThanOrEqual(512)
+  })
+})
+
+// ── runLeidenCommunityDetection ──────────────────────────────────────────────
+
+describe("runLeidenCommunityDetection", () => {
+  function makeClusteredGraph() {
+    // Two clusters: blog (3 nodes, dense links) and shop (3 nodes, dense links)
+    const nodes: GraphNode[] = [
+      makeNode("blog1", "blog"), makeNode("blog2", "blog"), makeNode("blog3", "blog"),
+      makeNode("shop1", "shop"), makeNode("shop2", "shop"), makeNode("shop3", "shop"),
+    ]
+    const edges: GraphEdge[] = [
+      { source: "blog1", target: "blog2" }, { source: "blog2", target: "blog3" }, { source: "blog3", target: "blog1" },
+      { source: "shop1", target: "shop2" }, { source: "shop2", target: "shop3" }, { source: "shop3", target: "shop1" },
+      { source: "blog1", target: "shop1" }, // single cross-link
+    ]
+    return { nodes, edges }
+  }
+
+  test("3.5.1 all nodes get a community assigned", () => {
+    const { nodes, edges } = makeClusteredGraph()
+    runLeidenCommunityDetection(nodes, edges)
+    for (const n of nodes) {
+      expect(n.community).toBeDefined()
+      expect(typeof n.community).toBe("string")
+    }
+  })
+
+  test("3.5.2 community id starts with c or equals c-other", () => {
+    const { nodes, edges } = makeClusteredGraph()
+    runLeidenCommunityDetection(nodes, edges)
+    for (const n of nodes) {
+      expect(n.community === "c-other" || /^c\d+$/.test(n.community)).toBe(true)
+    }
+  })
+
+  test("3.5.3 largest community gets c0", () => {
+    // 4 nodes in blog, 2 in shop (below minCommunitySize=3) → shop becomes c-other
+    const nodes: GraphNode[] = [
+      makeNode("b1", "blog"), makeNode("b2", "blog"), makeNode("b3", "blog"), makeNode("b4", "blog"),
+      makeNode("s1", "shop"), makeNode("s2", "shop"),
+    ]
+    const edges: GraphEdge[] = [
+      { source: "b1", target: "b2" }, { source: "b2", target: "b3" }, { source: "b3", target: "b4" }, { source: "b4", target: "b1" },
+      { source: "s1", target: "s2" }, { source: "s2", target: "s1" },
+      { source: "b1", target: "s1" },
+    ]
+    runLeidenCommunityDetection(nodes, edges, 3)
+    const blogNodes = nodes.filter(n => n.id.startsWith("b"))
+    const hasCZero = blogNodes.some(n => n.community === "c0")
+    expect(hasCZero).toBe(true)
+  })
+
+  test("3.5.4 singleton communities merged into c-other", () => {
+    // Isolated node with no links → becomes c-other
+    const nodes: GraphNode[] = [
+      makeNode("a1", "a"), makeNode("a2", "a"), makeNode("a3", "a"),
+      makeNode("isolated", "x"),
+    ]
+    const edges: GraphEdge[] = [
+      { source: "a1", target: "a2" }, { source: "a2", target: "a3" }, { source: "a3", target: "a1" },
+    ]
+    runLeidenCommunityDetection(nodes, edges, 3)
+    const isolated = nodes.find(n => n.id === "isolated")!
+    expect(isolated.community).toBe("c-other")
+  })
+
+  test("3.5.5 deterministic - same result on two runs", () => {
+    const { nodes, edges } = makeClusteredGraph()
+    const nodes2 = nodes.map(n => ({ ...n }))
+    runLeidenCommunityDetection(nodes, edges)
+    runLeidenCommunityDetection(nodes2, edges)
+    for (let i = 0; i < nodes.length; i++) {
+      expect(nodes[i]!.community).toBe(nodes2[i]!.community)
+    }
+  })
+})
+
+// ── runHdbscanSubclustering ──────────────────────────────────────────────────
+
+describe("runHdbscanSubclustering", () => {
+  function makeEmbeddedNodes(community: string, count: number, embeddings: (number[] | null)[]): GraphNode[] {
+    return Array.from({ length: count }, (_, i) => ({
+      ...makeNode(`${community}-${i}`, "test"),
+      community,
+      _embedding: embeddings[i] ?? null,
+    }))
+  }
+
+  test("5.5.1 communities with <5 nodes get subcluster null", () => {
+    const nodes = makeEmbeddedNodes("c0", 4, [[1,0],[0,1],[1,1],[0,0]])
+    const map = new Map([["c0", nodes]])
+    runHdbscanSubclustering(map)
+    for (const n of nodes) expect(n.subcluster).toBeNull()
+  })
+
+  test("5.5.2 subcluster format is <community>-s<N>", () => {
+    // Two tight clusters of 5 nodes each
+    const cluster1 = Array.from({length: 5}, (_, i) => [0.1 * i, 0.0])
+    const cluster2 = Array.from({length: 5}, (_, i) => [10 + 0.1 * i, 0.0])
+    const embeddings = [...cluster1, ...cluster2]
+    const nodes = makeEmbeddedNodes("c0", 10, embeddings)
+    const map = new Map([["c0", nodes]])
+    runHdbscanSubclustering(map)
+    const clustered = nodes.filter(n => n.subcluster !== null)
+    if (clustered.length > 0) {
+      for (const n of clustered) {
+        expect(n.subcluster).toMatch(/^c0-s\d+$/)
+      }
+    }
+  })
+
+  test("5.5.3 nodes without embeddings get null subcluster", () => {
+    const embeddings: (number[] | null)[] = [
+      [1,0],[1,0],[1,0],[1,0],[1,0],
+      null, null,  // no embedding
+    ]
+    const nodes = makeEmbeddedNodes("c0", 7, embeddings)
+    const map = new Map([["c0", nodes]])
+    runHdbscanSubclustering(map)
+    const noEmb = nodes.filter(n => n._embedding == null)
+    for (const n of noEmb) expect(n.subcluster).toBeNull()
+  })
+
+  test("5.5.4 small community threshold skip", () => {
+    // < 5 nodes
+    const nodes = makeEmbeddedNodes("c1", 3, [[1,0],[0,1],[1,1]])
+    const map = new Map([["c1", nodes]])
+    runHdbscanSubclustering(map)
+    for (const n of nodes) expect(n.subcluster).toBeNull()
+  })
+
+  test("5.5.5 subcluster ids scoped to community", () => {
+    const emb = Array.from({length: 6}, (_, i) => [i * 0.1, 0.0])
+    const c0nodes = makeEmbeddedNodes("c0", 6, emb)
+    const c1nodes = makeEmbeddedNodes("c1", 6, emb)
+    const map = new Map([["c0", c0nodes], ["c1", c1nodes]])
+    runHdbscanSubclustering(map)
+    for (const n of c0nodes.filter(n => n.subcluster)) {
+      expect(n.subcluster!.startsWith("c0-")).toBe(true)
+    }
+    for (const n of c1nodes.filter(n => n.subcluster)) {
+      expect(n.subcluster!.startsWith("c1-")).toBe(true)
+    }
+  })
+
+  test("5.5.6 _embedding not in serialized output after buildGraph", async () => {
+    const records: CrawlRecord[] = [
+      { url: "https://example.com/", finalUrl: "https://example.com/", title: "Home", status: 200, depth: 0, outboundLinks: [] },
+    ]
+    const graph = await buildGraph(records, "https://example.com/", 50, true)
+    for (const node of graph.nodes) {
+      expect("_embedding" in node).toBe(false)
+    }
   })
 })

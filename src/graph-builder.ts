@@ -1,3 +1,4 @@
+import { parse } from "node-html-parser"
 import type { CrawlRecord, Graph, GraphEdge, GraphNode, GraphStats, LangStat, SectionStat, TemplateStat } from "./types"
 
 const LANG_RE = /^[a-z]{2}(-[a-z]{2,4})?$/i
@@ -109,7 +110,194 @@ export function filterHighIndegreeEdges(graph: Graph, navThreshold: number): Gra
   return { nodes: newNodes, edges: filteredEdges, stats: newStats }
 }
 
-export function buildGraph(records: CrawlRecord[], startUrl: string, navThreshold = 50): Graph {
+// ── Text extraction ─────────────────────────────────────────────────────────
+
+export function extractPageText(html: string): string {
+  if (!html) return ""
+  const root = parse(html)
+  for (const el of root.querySelectorAll("script, style, nav, header, footer")) {
+    el.remove()
+  }
+  const content = root.querySelector("main") ?? root.querySelector("article") ?? root.querySelector("body")
+  if (!content) return ""
+  const text = content.innerText.replace(/\s+/g, " ").trim()
+  // ~512 tokens (approx 4 chars/token, use word split as proxy)
+  return text.split(" ").slice(0, 512).join(" ")
+}
+
+// ── Leiden (Louvain) community detection ────────────────────────────────────
+
+export function runLeidenCommunityDetection(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  minCommunitySize = 3
+): void {
+  // Using louvain (deterministic with fixed rng) since no JS leiden package exists
+  const { DirectedGraph } = require("graphology") as { DirectedGraph: new (opts?: any) => any }
+  const louvain = require("graphology-communities-louvain") as (g: any, opts?: any) => Record<string, number>
+
+  const g = new DirectedGraph()
+  for (const node of nodes) g.addNode(node.id)
+  for (const edge of edges) {
+    if (g.hasNode(edge.source) && g.hasNode(edge.target) && !g.hasEdge(edge.source, edge.target)) {
+      try { g.addEdge(edge.source, edge.target) } catch { /* skip duplicate */ }
+    }
+  }
+
+  const communities: Record<string, number> = louvain(g, { resolution: 1, randomWalk: false, rng: () => 0.42 })
+
+  // Count sizes
+  const counts = new Map<number, number>()
+  for (const c of Object.values(communities)) {
+    counts.set(c, (counts.get(c) ?? 0) + 1)
+  }
+
+  // Sort by size descending; assign c0, c1, ... to communities >= minCommunitySize
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1])
+  const communityMap = new Map<number, string>()
+  let idx = 0
+  for (const [intId, size] of sorted) {
+    communityMap.set(intId, size >= minCommunitySize ? `c${idx++}` : "c-other")
+  }
+
+  const nodeMap = new Map(nodes.map(n => [n.id, n]))
+  for (const [nodeId, communityInt] of Object.entries(communities)) {
+    const node = nodeMap.get(nodeId)
+    if (node) node.community = communityMap.get(communityInt) ?? "c-other"
+  }
+}
+
+// ── Embeddings ────────────────────────────────────────────────────────────
+
+export async function computeEmbeddings(
+  nodes: GraphNode[],
+  htmlMap: Map<string, string>
+): Promise<void> {
+  try {
+    const { pipeline } = await import("@xenova/transformers") as any
+    console.log("\nLoading embedding model (first run downloads ~80MB, cached afterwards)...")
+    const extractor = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2")
+    process.stdout.write("Computing embeddings")
+    for (const node of nodes) {
+      const html = htmlMap.get(node.id) ?? ""
+      const text = extractPageText(html)
+      if (!text) {
+        node._embedding = null
+        continue
+      }
+      const output = await extractor(text, { pooling: "mean", normalize: true })
+      node._embedding = Array.from(output.data as Float32Array)
+      process.stdout.write(".")
+    }
+    process.stdout.write("\n")
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn(`\nWarning: embedding computation failed (${msg}), subclusters will be null`)
+    for (const node of nodes) node._embedding = null
+  }
+}
+
+// ── HDBSCAN (DBSCAN-based) subclustering ─────────────────────────────────
+
+function euclidean(a: number[], b: number[]): number {
+  let sum = 0
+  for (let i = 0; i < a.length; i++) sum += (a[i]! - b[i]!) ** 2
+  return Math.sqrt(sum)
+}
+
+function estimateEpsilon(points: number[][], k: number): number {
+  const kDists: number[] = []
+  for (let i = 0; i < points.length; i++) {
+    const dists: number[] = []
+    for (let j = 0; j < points.length; j++) {
+      if (j !== i) dists.push(euclidean(points[i]!, points[j]!))
+    }
+    dists.sort((a, b) => a - b)
+    kDists.push(dists[k - 1] ?? 0.5)
+  }
+  kDists.sort((a, b) => a - b)
+  return kDists[Math.floor(kDists.length / 2)] ?? 0.5
+}
+
+// DBSCAN used as HDBSCAN approximation — produces noise points (-1) and cluster labels
+function dbscan(points: number[][], eps: number, minPts: number): number[] {
+  const n = points.length
+  const labels = new Array<number>(n).fill(-1)
+  const visited = new Array<boolean>(n).fill(false)
+  let cluster = 0
+
+  const rangeQuery = (i: number): number[] => {
+    const result: number[] = []
+    for (let j = 0; j < n; j++) {
+      if (j !== i && euclidean(points[i]!, points[j]!) <= eps) result.push(j)
+    }
+    return result
+  }
+
+  for (let i = 0; i < n; i++) {
+    if (visited[i]) continue
+    visited[i] = true
+    const nbrs = rangeQuery(i)
+    if (nbrs.length < minPts - 1) continue
+    labels[i] = cluster
+    const seed = [...nbrs]
+    let k = 0
+    while (k < seed.length) {
+      const j = seed[k++]!
+      if (!visited[j]) {
+        visited[j] = true
+        const nbrs2 = rangeQuery(j)
+        if (nbrs2.length >= minPts - 1) {
+          for (const nb of nbrs2) {
+            if (!seed.includes(nb)) seed.push(nb)
+          }
+        }
+      }
+      if (labels[j] === -1) labels[j] = cluster
+    }
+    cluster++
+  }
+  return labels
+}
+
+export function runHdbscanSubclustering(
+  nodesByCommunity: Map<string, GraphNode[]>
+): void {
+  for (const [community, communityNodes] of nodesByCommunity) {
+    if (communityNodes.length < 5) {
+      for (const n of communityNodes) n.subcluster = null
+      continue
+    }
+
+    const withEmbedding = communityNodes.filter(n => n._embedding != null)
+    if (withEmbedding.length < 5) {
+      for (const n of communityNodes) n.subcluster = null
+      continue
+    }
+
+    const minClusterSize = Math.max(3, Math.floor(communityNodes.length * 0.1))
+    const points = withEmbedding.map(n => n._embedding!)
+    const eps = estimateEpsilon(points, minClusterSize)
+    const labels = dbscan(points, eps, minClusterSize)
+
+    for (let i = 0; i < withEmbedding.length; i++) {
+      const label = labels[i]!
+      withEmbedding[i]!.subcluster = label === -1 ? null : `${community}-s${label}`
+    }
+    for (const n of communityNodes) {
+      if (n._embedding == null) n.subcluster = null
+    }
+  }
+}
+
+// ── Graph builder ────────────────────────────────────────────────────────────
+
+export async function buildGraph(
+  records: CrawlRecord[],
+  startUrl: string,
+  navThreshold = 50,
+  noEmbeddings = false
+): Promise<Graph> {
   const rootUrl = (() => {
     try { return new URL(startUrl).href } catch { return startUrl }
   })()
@@ -132,6 +320,8 @@ export function buildGraph(records: CrawlRecord[], startUrl: string, navThreshol
       outbound: 0,
       orphan: false,
       dead: false,
+      community: "c0",
+      subcluster: null,
     })
   }
 
@@ -170,6 +360,32 @@ export function buildGraph(records: CrawlRecord[], startUrl: string, navThreshol
   }
 
   const nodes = Array.from(nodeMap.values())
+
+  // ── Post-processing: community detection + semantic subclustering ──
+
+  runLeidenCommunityDetection(nodes, edges)
+
+  if (noEmbeddings) {
+    for (const node of nodes) node.subcluster = null
+  } else {
+    const htmlMap = new Map(records.map(r => [r.finalUrl || r.url, r.html ?? ""]))
+    await computeEmbeddings(nodes, htmlMap)
+
+    const nodesByCommunity = new Map<string, GraphNode[]>()
+    for (const node of nodes) {
+      const list = nodesByCommunity.get(node.community) ?? []
+      list.push(node)
+      nodesByCommunity.set(node.community, list)
+    }
+    runHdbscanSubclustering(nodesByCommunity)
+  }
+
+  // Strip internal embedding field before serialization
+  for (const node of nodes) {
+    delete node._embedding
+  }
+
+  // ── Stats ───────────────────────────────────────────────────────────────
 
   const sectionPageMap = new Map<string, Set<string>>()
   const sectionTemplateMap = new Map<string, Set<string>>()

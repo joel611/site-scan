@@ -221,8 +221,11 @@ const filters = {
 
 // --- Color palette (Tableau10) ---
 const TABLEAU10 = ['#4e79a7','#f28e2c','#e15759','#76b7b2','#59a14f','#edc949','#af7aa1','#ff9da7','#9c755f','#bab0ab'];
-const sections = [...new Set(GRAPH_DATA.nodes.map(n => n.section))];
-const colorScale = (section) => TABLEAU10[sections.indexOf(section) % TABLEAU10.length];
+const hasCommunityData = GRAPH_DATA.nodes.some(n => n.community);
+// Group key: community when present (new scans), section fallback (legacy data)
+const colorGroups = [...new Set(GRAPH_DATA.nodes.map(n => (hasCommunityData ? n.community : null) || n.section))];
+const colorScale = (group) => TABLEAU10[colorGroups.indexOf(group) % TABLEAU10.length];
+function getGroupKey(n) { return (hasCommunityData ? n.community : null) || n.section; }
 
 function colorWithOpacity(hex, opacity) {
   const r = parseInt(hex.slice(1,3), 16);
@@ -241,10 +244,14 @@ function switchTab(tab) {
 }
 
 // --- Build filter sidebar ---
+const sections = [...new Set(GRAPH_DATA.nodes.map(n => n.section))];
 function buildSidebar() {
   const container = document.getElementById('section-filters');
   filters.sections = new Set(sections);
   sections.forEach(sec => {
+    // Representative group key: use community of the first node in this section
+    const rep = GRAPH_DATA.nodes.find(n => n.section === sec);
+    const repKey = rep ? getGroupKey(rep) : sec;
     const label = document.createElement('label');
     const cb = document.createElement('input');
     cb.type = 'checkbox';
@@ -255,7 +262,7 @@ function buildSidebar() {
       applyFilters();
     });
     const dot = document.createElement('span');
-    dot.style.cssText = \`width:10px;height:10px;border-radius:50%;background:\${colorScale(sec)};display:inline-block;flex-shrink:0\`;
+    dot.style.cssText = \`width:10px;height:10px;border-radius:50%;background:\${colorScale(repKey)};display:inline-block;flex-shrink:0\`;
     label.appendChild(cb);
     label.appendChild(dot);
     label.appendChild(document.createTextNode(' ' + (sec === '/' ? '(root)' : sec)));
@@ -319,10 +326,11 @@ function isVisible(n) {
 
 function applyClustering(baseline, strength) {
   const visibleNodes = GRAPH_DATA.nodes.filter(n => isVisible(n));
-  const bySection = {};
+  const byGroup = {};
   visibleNodes.forEach(n => {
-    if (!bySection[n.section]) bySection[n.section] = [];
-    bySection[n.section].push(n.id);
+    const key = getGroupKey(n);
+    if (!byGroup[key]) byGroup[key] = [];
+    byGroup[key].push(n.id);
   });
 
   const positions = {};
@@ -332,16 +340,16 @@ function applyClustering(baseline, strength) {
 
   for (let iter = 0; iter < 30; iter++) {
     const centroids = {};
-    for (const [section, nodeIds] of Object.entries(bySection)) {
+    for (const [group, nodeIds] of Object.entries(byGroup)) {
       let cx = 0, cy = 0;
       for (const id of nodeIds) {
         cx += positions[id].x;
         cy += positions[id].y;
       }
-      centroids[section] = { x: cx / nodeIds.length, y: cy / nodeIds.length };
+      centroids[group] = { x: cx / nodeIds.length, y: cy / nodeIds.length };
     }
-    for (const [section, nodeIds] of Object.entries(bySection)) {
-      const c = centroids[section];
+    for (const [group, nodeIds] of Object.entries(byGroup)) {
+      const c = centroids[group];
       for (const id of nodeIds) {
         const p = positions[id];
         p.x += strength * (c.x - p.x);
@@ -413,13 +421,15 @@ GRAPH_DATA.nodes.forEach(n => {
     x: Math.random() * 100,
     y: Math.random() * 100,
     size: Math.max(5, Math.min(20, 5 + n.inbound * 0.8)),
-    color: colorScale(n.section),
+    color: colorScale(getGroupKey(n)),
     label: GRAPH_DATA.stats.isMultilingual && n.lang !== 'default'
       ? getPathLabel(n.url) + ' (' + n.lang + ')'
       : getPathLabel(n.url),
     lang: n.lang,
     depth: n.depth,
     section: n.section,
+    community: n.community,
+    subcluster: n.subcluster,
     orphan: n.orphan,
     dead: n.dead,
     status: n.status,
@@ -487,7 +497,7 @@ sigma.setSetting('nodeReducer', (node, data) => {
   }
   return {
     ...data,
-    color: data.dead ? '#ef4444' : colorScale(data.section),
+    color: data.dead ? '#ef4444' : colorScale(getGroupKey(data)),
     zIndex: data.dead ? 2 : (data.orphan ? 0 : 1),
     highlighted: isSelected || isHovered,
     borderColor: isSelected ? '#ffffff' : (data.dead ? '#dc2626' : 'rgba(255,255,255,0.15)'),
@@ -585,17 +595,18 @@ sigma.on('afterRender', () => {
   }
   hullCtx.clearRect(0, 0, hullCanvas.width, hullCanvas.height);
   const visibleNodes = GRAPH_DATA.nodes.filter(n => isVisible(n));
-  const bySection = {};
+  const byGroup = {};
   visibleNodes.forEach(n => {
-    if (!bySection[n.section]) bySection[n.section] = [];
+    const key = getGroupKey(n);
+    if (!byGroup[key]) byGroup[key] = [];
     const x = graph.getNodeAttribute(n.id, 'x');
     const y = graph.getNodeAttribute(n.id, 'y');
-    bySection[n.section].push({ id: n.id, x, y, size: graph.getNodeAttribute(n.id, 'size') });
+    byGroup[key].push({ id: n.id, x, y, size: graph.getNodeAttribute(n.id, 'size') });
   });
 
-  Object.entries(bySection).forEach(([section, nodes]) => {
+  Object.entries(byGroup).forEach(([group, nodes]) => {
     if (nodes.length === 0) return;
-    const color = colorScale(section);
+    const color = colorScale(group);
     hullCtx.fillStyle = colorWithOpacity(color, 0.08);
     hullCtx.strokeStyle = colorWithOpacity(color, 0.30);
     hullCtx.setLineDash([4, 3]);

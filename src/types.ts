@@ -7,6 +7,7 @@ export interface ScanOptions {
   keepQuery: boolean
   noFilterNav: boolean
   navThreshold: number
+  noEmbeddings: boolean
 }
 
 export interface CrawlRecord {
@@ -16,6 +17,7 @@ export interface CrawlRecord {
   status: number
   depth: number
   outboundLinks: string[]
+  html?: string
 }
 
 export interface GraphNode {
@@ -31,6 +33,9 @@ export interface GraphNode {
   outbound: number
   orphan: boolean
   dead: boolean
+  community: string
+  subcluster: string | null
+  _embedding?: number[] | null
 }
 
 export interface GraphEdge {
