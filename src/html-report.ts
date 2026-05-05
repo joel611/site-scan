@@ -111,6 +111,14 @@ h3.section-title { font-size: 14px; font-weight: 600; color: #e2e8f0; margin-bot
 .dp-list-item:hover { background: #1e2235; color: #e2e8f0; }
 .dp-item-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dead-badge { background: #7f1d1d; border: 1px solid #dc2626; color: #fca5a5; font-size: 10px; padding: 1px 5px; border-radius: 3px; flex-shrink: 0; }
+.missing-badge { background: #1e2a1a; border: 1px solid #4a5568; color: #718096; font-size: 10px; padding: 1px 5px; border-radius: 3px; flex-shrink: 0; font-style: italic; }
+.dp-lang-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 5px; font-size: 12px; color: #94a3b8; }
+.dp-lang-row.missing { opacity: 0.5; }
+.dp-lang-code { width: 32px; font-weight: 600; color: #a78bfa; flex-shrink: 0; font-size: 11px; }
+.dp-lang-row.missing .dp-lang-code { color: #64748b; }
+.dp-lang-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dp-lang-url { font-family: monospace; font-size: 10px; color: #475569; cursor: pointer; }
+.dp-lang-url:hover { color: #a78bfa; text-decoration: underline; }
 .dp-empty { font-size: 12px; color: #475569; font-style: italic; padding: 2px 0; }
 .dp-more { font-size: 11px; color: #475569; font-style: italic; padding: 2px 8px; }
 </style>
@@ -180,6 +188,10 @@ h3.section-title { font-size: 14px; font-weight: 600; color: #e2e8f0; margin-bot
       <div id="dp-meta"><span>Status: <span id="dp-status"></span></span><span id="dp-depth-meta"></span></div>
       <button id="dp-visit" onclick="visitPage()">Visit page →</button>
       <div id="dp-body">
+        <div class="dp-section" id="dp-langs-section" style="display:none">
+          <div class="dp-section-title">Languages <span id="dp-langs-count" class="dp-count"></span></div>
+          <div id="dp-langs"></div>
+        </div>
         <div class="dp-section">
           <div class="dp-section-title">Sources <span id="dp-sources-count" class="dp-count"></span></div>
           <div id="dp-sources"></div>
@@ -437,6 +449,8 @@ GRAPH_DATA.nodes.forEach(n => {
     url: n.url,
     inbound: n.inbound,
     outbound: n.outbound,
+    langVariants: n.langVariants,
+    missingLangs: n.missingLangs,
   });
 });
 
@@ -691,6 +705,19 @@ function buildStats() {
     \${buildTable(['Language', 'Pages'], stats.langBreakdown.map(r => [r.lang, r.pageCount]), 'lang-table')}
   \` : '';
 
+  const i18nCoverageHtml = (() => {
+    if (!stats.isMultilingual) return '';
+    const nodes = GRAPH_DATA.nodes;
+    const withMissing = nodes.filter(n => n.missingLangs && n.missingLangs.length > 0);
+    if (withMissing.length === 0) return '<h3 class="section-title" style="margin-top:24px">i18n Coverage</h3><p style="color:#59a14f;font-size:13px;margin-top:8px">All pages translated in all languages ✓</p>';
+    const rows = withMissing.map(n => {
+      let path; try { path = new URL(n.url).pathname; } catch(_) { path = n.url; }
+      return [path, n.langVariants ? Object.keys(n.langVariants).join(', ') : '—', (n.missingLangs || []).join(', ')];
+    });
+    return \`<h3 class="section-title" style="margin-top:24px">i18n Coverage <span style="color:#64748b;font-weight:normal;font-size:12px">(\${withMissing.length} pages missing translations)</span></h3>
+    \${buildTable(['Page', 'Has', 'Missing'], rows, 'i18n-table')}\`;
+  })();
+
   view.innerHTML = \`
     <div class="cards">\${cards.map(([l, v]) => \`<div class="card"><div class="c-label">\${l}</div><div class="c-val">\${v}</div></div>\`).join('')}</div>
     <h3 class="section-title">Section Breakdown</h3>
@@ -698,6 +725,7 @@ function buildStats() {
     <h3 class="section-title" style="margin-top:24px">Template Breakdown</h3>
     \${buildTable(['Pattern', 'Pages', 'Section'], stats.templateBreakdown.map(r => [r.pattern, r.pageCount, r.section]), 'template-table')}
     \${langTableHtml}
+    \${i18nCoverageHtml}
   \`;
 
   initSortable('section-table', stats.sectionBreakdown.map(r => [r.section, r.pageCount, r.templateCount]));
@@ -752,6 +780,7 @@ function openPanel(node) {
   document.getElementById('dp-url').textContent = node.url;
   document.getElementById('dp-status').textContent = node.status || 'timeout';
   document.getElementById('dp-depth-meta').textContent = 'Depth: ' + node.depth;
+  renderLangs(node);
   renderSources(node.id);
   renderBacklinks(node.id);
   document.getElementById('detail-panel').classList.add('open');
@@ -784,6 +813,34 @@ function renderNodeList(container, nodes, cap) {
     more.className = 'dp-more';
     more.textContent = '+' + (nodes.length - cap) + ' more';
     container.appendChild(more);
+  }
+}
+
+function renderLangs(node) {
+  const section = document.getElementById('dp-langs-section');
+  const container = document.getElementById('dp-langs');
+  const countEl = document.getElementById('dp-langs-count');
+  if (!node.langVariants) { section.style.display = 'none'; return; }
+
+  const variants = Object.entries(node.langVariants);
+  const missing = node.missingLangs || [];
+  const total = variants.length + missing.length;
+  countEl.textContent = '(' + total + ')';
+  section.style.display = '';
+  container.innerHTML = '';
+
+  for (const [lang, v] of variants) {
+    const row = document.createElement('div');
+    row.className = 'dp-lang-row';
+    row.innerHTML = \`<span class="dp-lang-code">\${lang}</span><span class="dp-lang-title" title="\${v.title}">\${v.title || '(no title)'}</span><span class="dp-lang-url" onclick="window.open('\${v.url}','_blank')" title="\${v.url}">\${new URL(v.url).pathname}</span>\`;
+    container.appendChild(row);
+  }
+
+  for (const lang of missing) {
+    const row = document.createElement('div');
+    row.className = 'dp-lang-row missing';
+    row.innerHTML = \`<span class="dp-lang-code">\${lang}</span><span class="dp-lang-title" style="color:#475569">missing</span><span class="missing-badge">missing</span>\`;
+    container.appendChild(row);
   }
 }
 

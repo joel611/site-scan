@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test"
 import { extractLinks } from "./crawler"
+import { DEFAULT_EXCLUDE_PATTERNS, isExcluded } from "./exclude-patterns"
 
 const BASE = "https://example.com/page"
 
@@ -60,5 +61,26 @@ describe("extractLinks - header/footer/nav filtering (default: on)", () => {
     )
     expect(result).toContain("https://example.com/about")
     expect(result).toContain("https://example.com/contact")
+  })
+})
+
+describe("exclude pattern filtering", () => {
+  test("6.1 URL matching default exclude pattern is excluded", () => {
+    expect(isExcluded("/cdn-cgi/rum", DEFAULT_EXCLUDE_PATTERNS)).toBe(true)
+    expect(isExcluded("/wp-admin/edit.php", DEFAULT_EXCLUDE_PATTERNS)).toBe(true)
+    expect(isExcluded("/wp-json/wp/v2/posts", DEFAULT_EXCLUDE_PATTERNS)).toBe(true)
+    expect(isExcluded("/.well-known/acme-challenge/token", DEFAULT_EXCLUDE_PATTERNS)).toBe(true)
+  })
+
+  test("6.2 URL matching user-supplied pattern is excluded", () => {
+    const patterns = [...DEFAULT_EXCLUDE_PATTERNS, "/api/**", "/staging/**"]
+    expect(isExcluded("/api/v1/users", patterns)).toBe(true)
+    expect(isExcluded("/staging/preview", patterns)).toBe(true)
+  })
+
+  test("6.3 non-matching URL is not excluded", () => {
+    expect(isExcluded("/about", DEFAULT_EXCLUDE_PATTERNS)).toBe(false)
+    expect(isExcluded("/blog/post-1", DEFAULT_EXCLUDE_PATTERNS)).toBe(false)
+    expect(isExcluded("/cdn-cgi-info", DEFAULT_EXCLUDE_PATTERNS)).toBe(false)
   })
 })

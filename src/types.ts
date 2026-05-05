@@ -8,6 +8,13 @@ export interface ScanOptions {
   noFilterNav: boolean
   navThreshold: number
   noEmbeddings: boolean
+  langPrefixes?: string[]
+  excludePatterns?: string[]
+}
+
+export interface LangVariant {
+  url: string
+  title: string
 }
 
 export interface CrawlRecord {
@@ -18,6 +25,8 @@ export interface CrawlRecord {
   depth: number
   outboundLinks: string[]
   html?: string
+  langVariants?: Record<string, LangVariant>
+  missingLangs?: string[]
 }
 
 export interface GraphNode {
@@ -35,6 +44,8 @@ export interface GraphNode {
   dead: boolean
   community: string
   subcluster: string | null
+  langVariants?: Record<string, LangVariant>
+  missingLangs?: string[]
   _embedding?: number[] | null
 }
 

@@ -63,6 +63,36 @@ The CLI SHALL print crawl progress to stdout during execution showing pages craw
 - **WHEN** crawl is running
 - **THEN** stdout shows a line like `Crawling... 42 pages found, 18 queued` updated in place
 
+### Requirement: --lang-prefix flag accepted by CLI
+The CLI SHALL accept an optional `--lang-prefix` flag taking a comma-separated list of BCP-47 language codes.
+
+#### Scenario: Valid flag parsed
+- **WHEN** user passes `--lang-prefix en,fr,es`
+- **THEN** `ScanOptions.langPrefixes` is `["en", "fr", "es"]`
+
+#### Scenario: Invalid code rejected
+- **WHEN** user passes `--lang-prefix en,toolong`
+- **THEN** CLI prints an error and exits with code 1
+
+#### Scenario: Flag omitted
+- **WHEN** `--lang-prefix` is not provided
+- **THEN** `ScanOptions.langPrefixes` is `undefined` and auto-detection runs after crawl
+
+### Requirement: --exclude flag
+The CLI SHALL accept a repeatable `--exclude <glob>` flag. Each value SHALL be a URL path glob pattern. All user-supplied patterns SHALL be merged with the default exclude list and passed to the crawler.
+
+#### Scenario: Single exclude pattern
+- **WHEN** user runs `bun site-scan example.com --exclude "/api/*"`
+- **THEN** `ScanOptions.excludePatterns` contains `/api/*` in addition to all default patterns
+
+#### Scenario: Multiple exclude patterns
+- **WHEN** user runs `bun site-scan example.com --exclude "/api/*" --exclude "/staging/*"`
+- **THEN** `ScanOptions.excludePatterns` contains both `/api/*` and `/staging/*` plus defaults
+
+#### Scenario: Flag omitted
+- **WHEN** user runs without `--exclude`
+- **THEN** `ScanOptions.excludePatterns` contains only the default exclude patterns
+
 ### Requirement: Completion summary
 The CLI SHALL print a summary on completion with total pages, templates, and output file path.
 

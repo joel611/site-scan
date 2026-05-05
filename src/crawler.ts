@@ -1,4 +1,5 @@
 import { parse } from "node-html-parser"
+import { DEFAULT_EXCLUDE_PATTERNS, isExcluded } from "./exclude-patterns"
 import type { CrawlRecord, ScanOptions } from "./types"
 
 const ASSET_EXTENSIONS = /\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|pdf|zip|gz|tar|mp4|mp3|avi|mov|webp|avif)$/i
@@ -169,10 +170,12 @@ export async function crawl(options: ScanOptions): Promise<CrawlRecord[]> {
       const outboundLinks: string[] = []
       const toEnqueue: QueueItem[] = []
 
+      const excludePatterns = options.excludePatterns ?? DEFAULT_EXCLUDE_PATTERNS
       for (const link of allLinks) {
         try {
           const linkUrl = new URL(link)
           if (linkUrl.hostname !== baseHostname) continue
+          if (isExcluded(linkUrl.pathname, excludePatterns)) continue
           if (edgeLinks.has(link)) outboundLinks.push(link)
           if (!visited.has(link)) {
             const nextDepth = pageDepth + 1

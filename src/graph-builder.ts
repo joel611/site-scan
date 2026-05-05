@@ -1,7 +1,151 @@
 import { parse } from "node-html-parser"
-import type { CrawlRecord, Graph, GraphEdge, GraphNode, GraphStats, LangStat, SectionStat, TemplateStat } from "./types"
+import type { CrawlRecord, Graph, GraphEdge, GraphNode, GraphStats, LangStat, LangVariant, SectionStat, TemplateStat } from "./types"
 
 const LANG_RE = /^[a-z]{2}(-[a-z]{2,4})?$/i
+const LANG_OVERLAP_THRESHOLD = 0.30
+
+export function detectLangPrefixes(records: CrawlRecord[]): { prefix: string; count: number }[] {
+  // Pass 1: collect first-path-segments matching LANG_RE → Set<canonicalPath>
+  const candidatePaths = new Map<string, Set<string>>()
+  for (const rec of records) {
+    try {
+      const { pathname } = new URL(rec.finalUrl || rec.url)
+      const parts = pathname.split("/").filter(Boolean)
+      if (parts.length === 0) continue
+      const first = parts[0]!
+      if (!LANG_RE.test(first)) continue
+      const canonical = "/" + parts.slice(1).join("/")
+      const key = first.toLowerCase()
+      const set = candidatePaths.get(key) ?? new Set()
+      set.add(canonical)
+      candidatePaths.set(key, set)
+    } catch { /* skip malformed */ }
+  }
+
+  if (candidatePaths.size < 2) return []
+
+  // Pass 2: discard candidates with insufficient path overlap against any other candidate
+  const candidates = Array.from(candidatePaths.keys())
+  const valid = new Set<string>()
+  for (const a of candidates) {
+    const aSet = candidatePaths.get(a)!
+    for (const b of candidates) {
+      if (a === b) continue
+      const bSet = candidatePaths.get(b)!
+      const overlap = [...aSet].filter(p => bSet.has(p)).length
+      const minSize = Math.min(aSet.size, bSet.size)
+      if (minSize > 0 && overlap / minSize >= LANG_OVERLAP_THRESHOLD) {
+        valid.add(a)
+        valid.add(b)
+        break
+      }
+    }
+  }
+
+  return Array.from(valid).map(prefix => ({
+    prefix,
+    count: candidatePaths.get(prefix)!.size,
+  })).sort((a, b) => b.count - a.count)
+}
+
+function stripLangPrefix(url: string, lang: string): string {
+  try {
+    const u = new URL(url)
+    const parts = u.pathname.split("/").filter(Boolean)
+    if (parts[0]?.toLowerCase() === lang) {
+      u.pathname = "/" + parts.slice(1).join("/")
+    }
+    return u.href
+  } catch {
+    return url
+  }
+}
+
+export function mergeMultilingualRecords(records: CrawlRecord[], confirmedLangs: string[]): CrawlRecord[] {
+  const langSet = new Set(confirmedLangs.map(l => l.toLowerCase()))
+
+  // Bucket records: lang-prefixed vs plain
+  const variantsByCanonical = new Map<string, Map<string, CrawlRecord>>()
+  const plain: CrawlRecord[] = []
+
+  for (const rec of records) {
+    try {
+      const url = rec.finalUrl || rec.url
+      const { pathname } = new URL(url)
+      const parts = pathname.split("/").filter(Boolean)
+      const first = parts[0]?.toLowerCase() ?? ""
+      if (langSet.has(first)) {
+        const canonical = stripLangPrefix(url, first)
+        const byLang = variantsByCanonical.get(canonical) ?? new Map()
+        byLang.set(first, rec)
+        variantsByCanonical.set(canonical, byLang)
+      } else {
+        plain.push(rec)
+      }
+    } catch {
+      plain.push(rec)
+    }
+  }
+
+  if (variantsByCanonical.size === 0) return records
+
+  // Fold plain records whose URL matches a canonical into variantsByCanonical as "default" lang
+  const canonicalSet = new Set(variantsByCanonical.keys())
+  const remainingPlain: CrawlRecord[] = []
+  for (const rec of plain) {
+    const url = rec.finalUrl || rec.url
+    if (canonicalSet.has(url)) {
+      variantsByCanonical.get(url)!.set("default", rec)
+    } else {
+      remainingPlain.push(rec)
+    }
+  }
+
+  // Build merged canonical records
+  const merged: CrawlRecord[] = []
+
+  for (const [canonical, byLang] of variantsByCanonical) {
+    // Pick primary record (first confirmed lang with a variant, or first available)
+    const primaryLang = confirmedLangs.find(l => byLang.has(l)) ?? [...byLang.keys()][0]!
+    const primary = byLang.get(primaryLang)!
+
+    const langVariants: Record<string, LangVariant> = {}
+    for (const [lang, rec] of byLang) {
+      langVariants[lang] = { url: rec.finalUrl || rec.url, title: rec.title }
+    }
+
+    const missingLangs = confirmedLangs.filter(l => l !== "default" && !byLang.has(l))
+
+    // Merge outboundLinks: map each variant's links to canonical URLs, dedup, drop cross-lang self-refs
+    const canonicalLinkSet = new Set<string>()
+    for (const rec of byLang.values()) {
+      for (const link of rec.outboundLinks) {
+        try {
+          const linkParts = new URL(link).pathname.split("/").filter(Boolean)
+          const linkFirst = linkParts[0]?.toLowerCase() ?? ""
+          const canonicalLink = langSet.has(linkFirst) ? stripLangPrefix(link, linkFirst) : link
+          // drop self-referencing cross-lang edge
+          if (canonicalLink === canonical) continue
+          canonicalLinkSet.add(canonicalLink)
+        } catch { /* skip */ }
+      }
+    }
+
+    merged.push({
+      url: canonical,
+      finalUrl: canonical,
+      title: primary.title,
+      status: primary.status,
+      depth: primary.depth,
+      outboundLinks: Array.from(canonicalLinkSet),
+      html: primary.html,
+      langVariants,
+      missingLangs,
+    })
+  }
+
+  return [...remainingPlain, ...merged]
+}
 
 export function extractBaseSection(url: string): { lang: string; section: string } {
   try {
@@ -322,6 +466,8 @@ export async function buildGraph(
       dead: false,
       community: "c0",
       subcluster: null,
+      langVariants: rec.langVariants,
+      missingLangs: rec.missingLangs,
     })
   }
 

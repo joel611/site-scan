@@ -1,11 +1,78 @@
 #!/usr/bin/env bun
+import { createInterface } from "readline"
 import { crawl } from "./crawler"
-import { buildGraph } from "./graph-builder"
+import { DEFAULT_EXCLUDE_PATTERNS } from "./exclude-patterns"
+import { buildGraph, detectLangPrefixes, mergeMultilingualRecords } from "./graph-builder"
 import { generateReport } from "./html-report"
 import type { ScanOptions } from "./types"
 
+const LANG_CODE_RE = /^[a-z]{2}(-[a-z]{2,4})?$/i
+
+async function confirmLangPrefixes(
+  candidates: { prefix: string; count: number }[],
+  defaultCount: number,
+  flagValue: string[] | undefined,
+  isTTY: boolean
+): Promise<string[] | null> {
+  if (candidates.length === 0) return null
+
+  const detected = candidates.map(c => c.prefix)
+
+  if (!isTTY) {
+    if (flagValue) {
+      const flagSet = new Set(flagValue)
+      const detectedSet = new Set(detected)
+      const match = flagValue.every(l => detectedSet.has(l)) && detected.every(l => flagSet.has(l))
+      if (match) {
+        console.log(`  Lang prefix confirmed: ${flagValue.join(", ")}`)
+        return flagValue
+      }
+    }
+    console.warn("  Warning: non-TTY environment and no matching --lang-prefix flag. Skipping multilingual merge.")
+    return null
+  }
+
+  const detectedSet = new Set(detected)
+
+  const printCandidates = () => {
+    if (defaultCount > 0) console.log(`    /       ${defaultCount} pages  (default)`)
+    for (const c of candidates) console.log(`    /${c.prefix}   ${c.count} pages`)
+  }
+
+  if (flagValue) {
+    const flagSet = new Set(flagValue)
+    const match = flagValue.every(l => detectedSet.has(l)) && detected.every(l => flagSet.has(l))
+    if (match) {
+      console.log(`  Lang prefix confirmed: ${flagValue.join(", ")}`)
+      return flagValue
+    }
+    console.log(`\n  Detected lang prefixes:`)
+    printCandidates()
+    console.log(`  You provided: ${flagValue.join(", ")}`)
+  } else {
+    console.log("\n  Detected multilingual site:")
+    printCandidates()
+  }
+
+  return new Promise(resolve => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    rl.question("  Use these as language prefixes? [Y/n/custom]: ", answer => {
+      rl.close()
+      const trimmed = answer.trim()
+      if (!trimmed || trimmed.toLowerCase() === "y") {
+        resolve(flagValue ?? detected)
+      } else if (trimmed.toLowerCase() === "n") {
+        resolve(null)
+      } else {
+        const custom = trimmed.split(",").map(s => s.trim()).filter(Boolean)
+        resolve(custom.length > 0 ? custom : null)
+      }
+    })
+  })
+}
+
 function printUsage() {
-  console.error("Usage: site-scan <domain> [--depth N] [--limit N] [--no-robots] [--keep-query] [--no-filter-nav] [--nav-threshold N] [--no-embeddings]")
+  console.error("Usage: site-scan <domain> [--depth N] [--limit N] [--no-robots] [--keep-query] [--no-filter-nav] [--nav-threshold N] [--no-embeddings] [--lang-prefix CODES] [--exclude GLOB]")
   console.error("")
   console.error("  domain              Domain to scan (e.g. example.com or https://example.com)")
   console.error("  --depth N           Max crawl depth (default: unlimited)")
@@ -15,6 +82,8 @@ function printUsage() {
   console.error("  --no-filter-nav     Include links from <header>, <footer>, and <nav> elements")
   console.error("  --nav-threshold N   Remove edges to nodes linked from >N% of pages (default: 50, 0=off)")
   console.error("  --no-embeddings     Skip page embedding computation (subclusters will be null)")
+  console.error("  --lang-prefix CODES Comma-separated BCP-47 lang codes to use as path prefixes (e.g. en,fr,es)")
+  console.error("  --exclude GLOB      Skip URLs matching glob pattern; repeatable (e.g. /api/**)  ")
   process.exit(1)
 }
 
@@ -41,6 +110,8 @@ function parseArgs(): ScanOptions {
   let noFilterNav = false
   let navThreshold = 50
   let noEmbeddings = false
+  let langPrefixes: string[] | undefined
+  const userExcludePatterns: string[] = []
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--depth" && args[i + 1]) {
@@ -63,12 +134,23 @@ function parseArgs(): ScanOptions {
       noFilterNav = true
     } else if (args[i] === "--no-embeddings") {
       noEmbeddings = true
+    } else if (args[i] === "--lang-prefix" && args[i + 1]) {
+      const codes = (args[++i] ?? "").split(",").map(s => s.trim()).filter(Boolean)
+      for (const code of codes) {
+        if (!LANG_CODE_RE.test(code)) {
+          console.error(`Error: invalid lang code "${code}" in --lang-prefix (expected BCP-47, e.g. en, fr, zh-tw)`)
+          process.exit(1)
+        }
+      }
+      langPrefixes = codes
     } else if (args[i] === "--nav-threshold" && args[i + 1]) {
       navThreshold = parseInt(args[++i] ?? "", 10)
       if (isNaN(navThreshold) || navThreshold < 0 || navThreshold > 100) {
         console.error("Error: --nav-threshold must be an integer between 0 and 100")
         process.exit(1)
       }
+    } else if (args[i] === "--exclude" && args[i + 1]) {
+      userExcludePatterns.push(args[++i] ?? "")
     } else {
       console.error(`Error: Unknown argument: ${args[i] ?? ""}`)
 
@@ -78,8 +160,9 @@ function parseArgs(): ScanOptions {
 
   const startUrl = parseDomain(domainArg)
   const domain = new URL(startUrl).hostname
+  const excludePatterns = [...DEFAULT_EXCLUDE_PATTERNS, ...userExcludePatterns]
 
-  return { domain, startUrl, depth, limit, noRobots, keepQuery, noFilterNav, navThreshold, noEmbeddings }
+  return { domain, startUrl, depth, limit, noRobots, keepQuery, noFilterNav, navThreshold, noEmbeddings, langPrefixes, excludePatterns }
 }
 
 async function main() {
@@ -94,9 +177,24 @@ async function main() {
   if (options.navThreshold > 0) console.log(`  Hub edge threshold: ${options.navThreshold}%`)
   else console.log("  Hub edge filter: disabled")
   if (options.noEmbeddings) console.log("  Embeddings: disabled (--no-embeddings)")
+  if (options.langPrefixes) console.log(`  Lang prefixes: ${options.langPrefixes.join(", ")}`)
+  const userPatterns = (options.excludePatterns ?? []).filter(p => !DEFAULT_EXCLUDE_PATTERNS.includes(p))
+  if (userPatterns.length > 0) console.log(`  Exclude patterns: ${userPatterns.join(", ")}`)
   console.log("")
 
-  const records = await crawl(options)
+  const rawRecords = await crawl(options)
+
+  const candidates = detectLangPrefixes(rawRecords)
+  const detectedPrefixSet = new Set(candidates.map(c => c.prefix))
+  const defaultCount = rawRecords.filter(r => {
+    try {
+      const parts = new URL(r.finalUrl || r.url).pathname.split("/").filter(Boolean)
+      return parts.length === 0 || !detectedPrefixSet.has(parts[0]!.toLowerCase())
+    } catch { return true }
+  }).length
+  const confirmedLangs = await confirmLangPrefixes(candidates, defaultCount, options.langPrefixes, process.stdin.isTTY ?? false)
+  const records = confirmedLangs ? mergeMultilingualRecords(rawRecords, confirmedLangs) : rawRecords
+
   const graph = await buildGraph(records, options.startUrl, options.navThreshold, options.noEmbeddings)
   await generateReport(graph, options)
 
