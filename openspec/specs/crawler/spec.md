@@ -18,7 +18,7 @@ The crawler SHALL traverse the target site using breadth-first search starting f
 - **THEN** root, A, B are crawled before C
 
 ### Requirement: Link extraction
-The crawler SHALL extract links from `<a href>` attributes. It SHALL skip: URL fragments (`#`), `mailto:`, `tel:`, and static asset extensions (`.css`, `.js`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.ico`, `.woff`, `.woff2`, `.ttf`, `.pdf`, `.zip`).
+The crawler SHALL extract links from `<a href>` attributes in the main content area. It SHALL skip links inside `<header>`, `<footer>`, and `<nav>` elements. It SHALL also skip: URL fragments (`#`), `mailto:`, `tel:`, and static asset extensions (`.css`, `.js`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.ico`, `.woff`, `.woff2`, `.ttf`, `.pdf`, `.zip`). When `--no-filter-nav` is passed, the sitewide chrome filter SHALL be disabled and all `<a href>` elements SHALL be considered.
 
 #### Scenario: Fragment links skipped
 - **WHEN** page contains `<a href="#section-2">`
@@ -27,6 +27,14 @@ The crawler SHALL extract links from `<a href>` attributes. It SHALL skip: URL f
 #### Scenario: Asset links skipped
 - **WHEN** page contains `<a href="/styles.css">`
 - **THEN** link is not added to crawl queue
+
+#### Scenario: Header links excluded by default
+- **WHEN** page contains `<header><a href="/home">Home</a></header>` and no `--no-filter-nav` flag
+- **THEN** `/home` is NOT included in `outboundLinks`
+
+#### Scenario: All links included with --no-filter-nav
+- **WHEN** page contains `<header><a href="/home">Home</a></header>` and `--no-filter-nav` is passed
+- **THEN** `/home` IS included in `outboundLinks`
 
 ### Requirement: URL normalization and deduplication
 The crawler SHALL normalize URLs before deduplication: lowercase hostname, resolve relative paths against current page URL, strip URL fragments. Without `--keep-query`, query strings SHALL also be stripped.
