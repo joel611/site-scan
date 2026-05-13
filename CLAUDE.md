@@ -104,3 +104,17 @@ bun --hot ./index.ts
 ```
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.md`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues (`joel611/site-scan`). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default canonical strings — needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — one `CONTEXT.md` + `docs/adr/` at repo root. See `docs/agents/domain.md`.
