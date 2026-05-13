@@ -1,5 +1,5 @@
 import { parse } from "node-html-parser"
-import type { CrawlRecord, Graph, GraphEdge, GraphNode, GraphStats, LangStat, LangVariant, SectionStat, TemplateStat } from "./types"
+import type { CrawlRecord, Graph, GraphEdge, GraphNode, GraphStats, LangStat, LangVariant, NodeRole, SectionStat, TemplateStat } from "./types"
 
 const LANG_RE = /^[a-z]{2}(-[a-z]{2,4})?$/i
 const LANG_OVERLAP_THRESHOLD = 0.30
@@ -524,6 +524,50 @@ export function assignNavSections(nodes: GraphNode[], edges: GraphEdge[], rootUr
   }
 }
 
+// ── Node role assignment ──────────────────────────────────────────────────────
+
+function assignNodeRoles(nodes: GraphNode[]): void {
+  const roles = new Map<string, NodeRole>()
+
+  for (const n of nodes) {
+    if (n.depth === 0) roles.set(n.id, 'sun')
+    else if (n.orphan || n.status !== 200) roles.set(n.id, 'asteroid')
+    else if (n.navSource === 'nav' || n.navSource === 'footer') roles.set(n.id, 'planet')
+  }
+
+  const navPlanetSections = new Set(
+    nodes.filter(n => roles.get(n.id) === 'planet').map(n => n.navSection).filter(Boolean) as string[]
+  )
+  for (const n of nodes) {
+    if (roles.has(n.id)) continue
+    if (n.navSection && navPlanetSections.has(n.navSection)) roles.set(n.id, 'moon')
+  }
+
+  const candidates = nodes.filter(n => !roles.has(n.id) && n.community != null)
+  const allCommunities = new Set(candidates.map(n => n.community))
+
+  if (allCommunities.size <= 1) {
+    for (const n of nodes) {
+      if (!roles.has(n.id)) roles.set(n.id, 'moon')
+    }
+  } else {
+    const communityMinDepth = new Map<string, number>()
+    for (const n of candidates) {
+      const cur = communityMinDepth.get(n.community)
+      if (cur === undefined || n.depth < cur) communityMinDepth.set(n.community, n.depth)
+    }
+    for (const n of nodes) {
+      if (roles.has(n.id)) continue
+      if (n.community != null && n.depth === communityMinDepth.get(n.community)) roles.set(n.id, 'planet')
+      else roles.set(n.id, 'moon')
+    }
+  }
+
+  for (const n of nodes) {
+    n.role = roles.get(n.id) ?? 'moon'
+  }
+}
+
 // ── Graph builder ────────────────────────────────────────────────────────────
 
 export async function buildGraph(
@@ -558,6 +602,7 @@ export async function buildGraph(
       subcluster: null,
       navSource: null,
       navSection: null,
+      role: 'moon',
       langVariants: rec.langVariants,
       missingLangs: rec.missingLangs,
     })
@@ -614,6 +659,7 @@ export async function buildGraph(
   // ── Post-processing: community detection + semantic subclustering ──
 
   runLeidenCommunityDetection(nodes, edges)
+  assignNodeRoles(nodes)
 
   if (noEmbeddings) {
     for (const node of nodes) node.subcluster = null
