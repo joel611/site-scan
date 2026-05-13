@@ -4,7 +4,7 @@ import { crawl } from "./crawler"
 import { DEFAULT_EXCLUDE_PATTERNS } from "./exclude-patterns"
 import { buildGraph, detectLangPrefixes, mergeMultilingualRecords } from "./graph-builder"
 import { generateReport } from "./html-report"
-import type { ScanOptions } from "./types"
+import type { CrawlRecord, ScanOptions } from "./types"
 
 const LANG_CODE_RE = /^[a-z]{2}(-[a-z]{2,4})?$/i
 
@@ -73,7 +73,7 @@ async function confirmLangPrefixes(
 
 function printUsage() {
   console.error("Usage: site-scan <domain> [--depth N] [--limit N] [--no-robots] [--keep-query] [--no-filter-nav] [--nav-threshold N] [--no-embeddings] [--lang-prefix CODES] [--exclude GLOB] [--json]")
-  console.error("       site-scan --from-json <file.json>")
+  console.error("       site-scan --from-json <file.json> [--nav-threshold N] [--no-embeddings] [--lang-prefix CODES] [--no-filter-nav]")
   console.error("")
   console.error("  domain              Domain to scan (e.g. example.com or https://example.com)")
   console.error("  --depth N           Max crawl depth (default: unlimited)")
@@ -85,8 +85,8 @@ function printUsage() {
   console.error("  --no-embeddings     Skip page embedding computation (subclusters will be null)")
   console.error("  --lang-prefix CODES Comma-separated BCP-47 lang codes to use as path prefixes (e.g. en,fr,es)")
   console.error("  --exclude GLOB      Skip URLs matching glob pattern; repeatable (e.g. /api/**)")
-  console.error("  --json              Save graph as <domain>-scan.json instead of generating HTML report")
-  console.error("  --from-json FILE    Generate HTML report from a previously saved JSON file")
+  console.error("  --json              Dump raw crawl records to <domain>-crawl.json (skips graph/report; use --from-json to reprocess)")
+  console.error("  --from-json FILE    Re-run full pipeline from a crawl dump; accepts --nav-threshold, --no-embeddings, --lang-prefix, --no-filter-nav")
   process.exit(1)
 }
 
@@ -111,11 +111,44 @@ function parseArgs(): ScanOptions {
       console.error("Error: --from-json requires a file path")
       process.exit(1)
     }
+
+    let navThreshold = 50
+    let noEmbeddings = false
+    let noFilterNav = false
+    let langPrefixes: string[] | undefined
+
+    const remaining = args.filter((_, i) => i !== fromJsonIdx && i !== fromJsonIdx + 1)
+    for (let i = 0; i < remaining.length; i++) {
+      if (remaining[i] === "--nav-threshold" && remaining[i + 1]) {
+        navThreshold = parseInt(remaining[++i] ?? "", 10)
+        if (isNaN(navThreshold) || navThreshold < 0 || navThreshold > 100) {
+          console.error("Error: --nav-threshold must be an integer between 0 and 100")
+          process.exit(1)
+        }
+      } else if (remaining[i] === "--no-embeddings") {
+        noEmbeddings = true
+      } else if (remaining[i] === "--no-filter-nav") {
+        noFilterNav = true
+      } else if (remaining[i] === "--lang-prefix" && remaining[i + 1]) {
+        const codes = (remaining[++i] ?? "").split(",").map(s => s.trim()).filter(Boolean)
+        for (const code of codes) {
+          if (!LANG_CODE_RE.test(code)) {
+            console.error(`Error: invalid lang code "${code}" in --lang-prefix (expected BCP-47, e.g. en, fr, zh-tw)`)
+            process.exit(1)
+          }
+        }
+        langPrefixes = codes
+      } else {
+        console.error(`Error: Unknown argument: ${remaining[i] ?? ""}`)
+        printUsage()
+      }
+    }
+
     return {
       domain: "", startUrl: "", depth: null, limit: 1000,
-      noRobots: false, keepQuery: false, noFilterNav: false,
-      navThreshold: 50, noEmbeddings: false, json: false,
-      fromJson: file,
+      noRobots: false, keepQuery: false, noFilterNav,
+      navThreshold, noEmbeddings, json: false,
+      fromJson: file, langPrefixes,
     }
   }
 
@@ -190,12 +223,61 @@ async function main() {
   const options = parseArgs()
 
   if (options.fromJson) {
-    const graph = JSON.parse(await Bun.file(options.fromJson).text())
-    const root = graph.nodes?.find((n: { depth: number; url: string }) => n.depth === 0)
-    const domain = root ? new URL(root.url).hostname : options.fromJson.replace(/-scan\.json$/, "").replace(/-/g, ".")
+    const raw: unknown = JSON.parse(await Bun.file(options.fromJson).text())
+
+    if (!Array.isArray(raw)) {
+      console.error("Error: --from-json expects a CrawlRecord[] array (output of --json). File is not an array.")
+      if (typeof raw === "object" && raw !== null && "nodes" in raw) {
+        console.error("       (Looks like an old Graph-format file. Re-crawl with --json to produce a crawl dump.)")
+      }
+      process.exit(1)
+    }
+    if (raw.length > 0) {
+      const first = raw[0]
+      if (!first || typeof first !== "object" || !("url" in first) || !("outboundLinks" in first)) {
+        console.error("Error: --from-json expects a CrawlRecord[] array (each item needs url and outboundLinks). Invalid file shape.")
+        process.exit(1)
+      }
+    }
+
+    const rawRecords = raw as CrawlRecord[]
+    const root = rawRecords.find(r => r.depth === 0)
+    const domain = root
+      ? new URL(root.finalUrl || root.url).hostname
+      : options.fromJson.replace(/-crawl\.json$/, "").replace(/-/g, ".")
+    const startUrl = root ? `https://${domain}/` : ""
+
+    console.log(`Processing crawl dump: ${options.fromJson}`)
+    console.log(`  Pages: ${rawRecords.length}`)
+    if (options.navThreshold > 0) console.log(`  Hub edge threshold: ${options.navThreshold}%`)
+    else console.log("  Hub edge filter: disabled")
+    if (options.noEmbeddings) console.log("  Embeddings: disabled (--no-embeddings)")
+    if (options.langPrefixes) console.log(`  Lang prefixes: ${options.langPrefixes.join(", ")}`)
+    console.log("")
+
+    const candidates = detectLangPrefixes(rawRecords)
+    const detectedPrefixSet = new Set(candidates.map(c => c.prefix))
+    const defaultCount = rawRecords.filter(r => {
+      try {
+        const parts = new URL(r.finalUrl || r.url).pathname.split("/").filter(Boolean)
+        return parts.length === 0 || !detectedPrefixSet.has(parts[0]!.toLowerCase())
+      } catch { return true }
+    }).length
+    const confirmedLangs = await confirmLangPrefixes(candidates, defaultCount, options.langPrefixes, process.stdin.isTTY ?? false)
+    const records = confirmedLangs ? mergeMultilingualRecords(rawRecords, confirmedLangs) : rawRecords
+
+    const graph = await buildGraph(records, startUrl, options.navThreshold, options.noEmbeddings)
     await generateReport(graph, domain)
+
     const outputFile = `${domain.replace(/\./g, "-")}-scan.html`
-    console.log(`Report generated: ./${outputFile}`)
+    const { stats } = graph
+    console.log("")
+    console.log("Report generated!")
+    console.log(`  Pages processed:  ${stats.totalPages}`)
+    console.log(`  Unique templates: ${stats.totalTemplates}`)
+    console.log(`  Orphan pages:     ${stats.orphanCount}`)
+    console.log(`  Dead links:       ${stats.deadCount}`)
+    console.log(`  Output:           ./${outputFile}`)
     return
   }
 
@@ -217,6 +299,13 @@ async function main() {
 
   const rawRecords = await crawl(options)
 
+  if (options.json) {
+    const outputFile = `${options.domain.replace(/\./g, "-")}-crawl.json`
+    await Bun.write(outputFile, JSON.stringify(rawRecords))
+    console.error(`\nSaved: ./${outputFile}`)
+    return
+  }
+
   const candidates = detectLangPrefixes(rawRecords)
   const detectedPrefixSet = new Set(candidates.map(c => c.prefix))
   const defaultCount = rawRecords.filter(r => {
@@ -229,13 +318,6 @@ async function main() {
   const records = confirmedLangs ? mergeMultilingualRecords(rawRecords, confirmedLangs) : rawRecords
 
   const graph = await buildGraph(records, options.startUrl, options.navThreshold, options.noEmbeddings)
-
-  if (options.json) {
-    const outputFile = `${options.domain.replace(/\./g, "-")}-scan.json`
-    await Bun.write(outputFile, JSON.stringify(graph))
-    console.error(`\nSaved: ./${outputFile}`)
-    return
-  }
 
   await generateReport(graph, options.domain)
 
