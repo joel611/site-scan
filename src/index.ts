@@ -72,7 +72,8 @@ async function confirmLangPrefixes(
 }
 
 function printUsage() {
-  console.error("Usage: site-scan <domain> [--depth N] [--limit N] [--no-robots] [--keep-query] [--no-filter-nav] [--nav-threshold N] [--no-embeddings] [--lang-prefix CODES] [--exclude GLOB]")
+  console.error("Usage: site-scan <domain> [--depth N] [--limit N] [--no-robots] [--keep-query] [--no-filter-nav] [--nav-threshold N] [--no-embeddings] [--lang-prefix CODES] [--exclude GLOB] [--json]")
+  console.error("       site-scan --from-json <file.json>")
   console.error("")
   console.error("  domain              Domain to scan (e.g. example.com or https://example.com)")
   console.error("  --depth N           Max crawl depth (default: unlimited)")
@@ -83,7 +84,9 @@ function printUsage() {
   console.error("  --nav-threshold N   Remove edges to nodes linked from >N% of pages (default: 50, 0=off)")
   console.error("  --no-embeddings     Skip page embedding computation (subclusters will be null)")
   console.error("  --lang-prefix CODES Comma-separated BCP-47 lang codes to use as path prefixes (e.g. en,fr,es)")
-  console.error("  --exclude GLOB      Skip URLs matching glob pattern; repeatable (e.g. /api/**)  ")
+  console.error("  --exclude GLOB      Skip URLs matching glob pattern; repeatable (e.g. /api/**)")
+  console.error("  --json              Save graph as <domain>-scan.json instead of generating HTML report")
+  console.error("  --from-json FILE    Generate HTML report from a previously saved JSON file")
   process.exit(1)
 }
 
@@ -98,9 +101,25 @@ function parseDomain(raw: string): string {
 function parseArgs(): ScanOptions {
   const args = process.argv.slice(2)
 
-  if (args.length === 0 || (args[0] ?? "").startsWith("--")) {
-    printUsage()
+  if (args.length === 0) printUsage()
+
+  // --from-json mode: no domain required
+  const fromJsonIdx = args.indexOf("--from-json")
+  if (fromJsonIdx !== -1) {
+    const file = args[fromJsonIdx + 1]
+    if (!file || file.startsWith("--")) {
+      console.error("Error: --from-json requires a file path")
+      process.exit(1)
+    }
+    return {
+      domain: "", startUrl: "", depth: null, limit: 1000,
+      noRobots: false, keepQuery: false, noFilterNav: false,
+      navThreshold: 50, noEmbeddings: false, json: false,
+      fromJson: file,
+    }
   }
+
+  if ((args[0] ?? "").startsWith("--")) printUsage()
 
   const domainArg = args[0] ?? ""
   let depth: number | null = null
@@ -110,6 +129,7 @@ function parseArgs(): ScanOptions {
   let noFilterNav = false
   let navThreshold = 50
   let noEmbeddings = false
+  let json = false
   let langPrefixes: string[] | undefined
   const userExcludePatterns: string[] = []
 
@@ -151,9 +171,10 @@ function parseArgs(): ScanOptions {
       }
     } else if (args[i] === "--exclude" && args[i + 1]) {
       userExcludePatterns.push(args[++i] ?? "")
+    } else if (args[i] === "--json") {
+      json = true
     } else {
       console.error(`Error: Unknown argument: ${args[i] ?? ""}`)
-
       printUsage()
     }
   }
@@ -162,25 +183,37 @@ function parseArgs(): ScanOptions {
   const domain = new URL(startUrl).hostname
   const excludePatterns = [...DEFAULT_EXCLUDE_PATTERNS, ...userExcludePatterns]
 
-  return { domain, startUrl, depth, limit, noRobots, keepQuery, noFilterNav, navThreshold, noEmbeddings, langPrefixes, excludePatterns }
+  return { domain, startUrl, depth, limit, noRobots, keepQuery, noFilterNav, navThreshold, noEmbeddings, json, langPrefixes, excludePatterns }
 }
 
 async function main() {
   const options = parseArgs()
 
-  console.log(`Scanning ${options.startUrl}`)
-  if (options.depth !== null) console.log(`  Max depth: ${options.depth}`)
-  console.log(`  Max pages: ${options.limit}`)
-  if (options.noRobots) console.log("  robots.txt: ignored")
-  if (options.keepQuery) console.log("  Query strings: preserved")
-  if (options.noFilterNav) console.log("  Nav filter: disabled")
-  if (options.navThreshold > 0) console.log(`  Hub edge threshold: ${options.navThreshold}%`)
-  else console.log("  Hub edge filter: disabled")
-  if (options.noEmbeddings) console.log("  Embeddings: disabled (--no-embeddings)")
-  if (options.langPrefixes) console.log(`  Lang prefixes: ${options.langPrefixes.join(", ")}`)
+  if (options.fromJson) {
+    const graph = JSON.parse(await Bun.file(options.fromJson).text())
+    const root = graph.nodes?.find((n: { depth: number; url: string }) => n.depth === 0)
+    const domain = root ? new URL(root.url).hostname : options.fromJson.replace(/-scan\.json$/, "").replace(/-/g, ".")
+    await generateReport(graph, domain)
+    const outputFile = `${domain.replace(/\./g, "-")}-scan.html`
+    console.log(`Report generated: ./${outputFile}`)
+    return
+  }
+
+  const log = options.json ? console.error : console.log
+
+  log(`Scanning ${options.startUrl}`)
+  if (options.depth !== null) log(`  Max depth: ${options.depth}`)
+  log(`  Max pages: ${options.limit}`)
+  if (options.noRobots) log("  robots.txt: ignored")
+  if (options.keepQuery) log("  Query strings: preserved")
+  if (options.noFilterNav) log("  Nav filter: disabled")
+  if (options.navThreshold > 0) log(`  Hub edge threshold: ${options.navThreshold}%`)
+  else log("  Hub edge filter: disabled")
+  if (options.noEmbeddings) log("  Embeddings: disabled (--no-embeddings)")
+  if (options.langPrefixes) log(`  Lang prefixes: ${options.langPrefixes.join(", ")}`)
   const userPatterns = (options.excludePatterns ?? []).filter(p => !DEFAULT_EXCLUDE_PATTERNS.includes(p))
-  if (userPatterns.length > 0) console.log(`  Exclude patterns: ${userPatterns.join(", ")}`)
-  console.log("")
+  if (userPatterns.length > 0) log(`  Exclude patterns: ${userPatterns.join(", ")}`)
+  log("")
 
   const rawRecords = await crawl(options)
 
@@ -196,7 +229,15 @@ async function main() {
   const records = confirmedLangs ? mergeMultilingualRecords(rawRecords, confirmedLangs) : rawRecords
 
   const graph = await buildGraph(records, options.startUrl, options.navThreshold, options.noEmbeddings)
-  await generateReport(graph, options)
+
+  if (options.json) {
+    const outputFile = `${options.domain.replace(/\./g, "-")}-scan.json`
+    await Bun.write(outputFile, JSON.stringify(graph))
+    console.error(`\nSaved: ./${outputFile}`)
+    return
+  }
+
+  await generateReport(graph, options.domain)
 
   const outputFile = `${options.domain.replace(/\./g, "-")}-scan.html`
   const { stats } = graph

@@ -20,6 +20,7 @@
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",
     "graphology-layout-forceatlas2": "^0.10.1",
+    "graphology-layout-noverlap": "^0.4.2",
     "minimatch": "^10.2.5",
     "node-html-parser": "^7.1.0",
     "sigma": "^3.0.0"

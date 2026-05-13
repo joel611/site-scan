@@ -136,7 +136,7 @@ export function mergeMultilingualRecords(records: CrawlRecord[], confirmedLangs:
       finalUrl: canonical,
       title: primary.title,
       status: primary.status,
-      depth: primary.depth,
+      depth: Math.min(...Array.from(byLang.values()).map(r => r.depth)),
       outboundLinks: Array.from(canonicalLinkSet),
       html: primary.html,
       langVariants,
@@ -434,6 +434,96 @@ export function runHdbscanSubclustering(
   }
 }
 
+// ── Nav anchor extraction ────────────────────────────────────────────────────
+
+export function extractNavAnchors(
+  html: string,
+  baseUrl: string,
+  knownUrls: Set<string>
+): Map<string, "nav" | "footer"> {
+  if (!html) return new Map()
+  const root = parse(html)
+  const result = new Map<string, "nav" | "footer">()
+  const base = new URL(baseUrl)
+
+  const normalizeHref = (href: string): string | null => {
+    try {
+      const u = new URL(href, baseUrl)
+      if (u.hostname !== base.hostname) return null
+      u.hash = ""
+      u.search = ""
+      const path = u.pathname
+      if (path.length > 1 && path.endsWith("/")) u.pathname = path.slice(0, -1)
+      return u.href
+    } catch {
+      return null
+    }
+  }
+
+  // Footer first (lower priority); nav overwrites
+  for (const a of root.querySelectorAll("footer a[href]")) {
+    const href = a.getAttribute("href") || ""
+    const url = normalizeHref(href)
+    if (url && knownUrls.has(url)) result.set(url, "footer")
+  }
+
+  // Nav/header second (higher priority; overwrites footer)
+  for (const a of root.querySelectorAll("header a[href], nav a[href]")) {
+    const href = a.getAttribute("href") || ""
+    const url = normalizeHref(href)
+    if (url && knownUrls.has(url)) result.set(url, "nav")
+  }
+
+  return result
+}
+
+// ── navSection BFS assignment ────────────────────────────────────────────────
+
+export function assignNavSections(nodes: GraphNode[], edges: GraphEdge[], rootUrl?: string): void {
+  const navAnchors = nodes.filter(n => n.navSource !== null)
+  if (navAnchors.length === 0) return
+
+  // Self-assign anchors
+  for (const anchor of navAnchors) {
+    anchor.navSection = anchor.url
+  }
+
+  // Build outbound adjacency
+  const outbound = new Map<string, string[]>()
+  for (const node of nodes) outbound.set(node.id, [])
+  for (const edge of edges) {
+    outbound.get(edge.source)?.push(edge.target)
+  }
+
+  // BFS: nav anchors first, then footer; root last so listing pages win over home's direct post links
+  const navAnchorsNav = navAnchors.filter(n => n.navSource === "nav")
+  const navNonRoot = navAnchorsNav.filter(n => n.id !== rootUrl)
+  const navRoot = navAnchorsNav.filter(n => n.id === rootUrl)
+  const footerQueue = navAnchors.filter(n => n.navSource === "footer")
+  const queue: Array<{ id: string; anchorUrl: string }> = [
+    ...navNonRoot.map(n => ({ id: n.id, anchorUrl: n.url })),
+    ...footerQueue.map(n => ({ id: n.id, anchorUrl: n.url })),
+    ...navRoot.map(n => ({ id: n.id, anchorUrl: n.url })),
+  ]
+
+  const nodeMap = new Map(nodes.map(n => [n.id, n]))
+  const visited = new Set<string>(navAnchors.map(n => n.id))
+
+  let head = 0
+  while (head < queue.length) {
+    const item = queue[head++]!
+    for (const targetId of outbound.get(item.id) ?? []) {
+      if (visited.has(targetId)) continue
+      visited.add(targetId)
+      const target = nodeMap.get(targetId)
+      if (target) {
+        target.navSection = item.anchorUrl
+        queue.push({ id: targetId, anchorUrl: item.anchorUrl })
+      }
+    }
+  }
+}
+
 // ── Graph builder ────────────────────────────────────────────────────────────
 
 export async function buildGraph(
@@ -466,6 +556,8 @@ export async function buildGraph(
       dead: false,
       community: "c0",
       subcluster: null,
+      navSource: null,
+      navSection: null,
       langVariants: rec.langVariants,
       missingLangs: rec.missingLangs,
     })
@@ -505,7 +597,19 @@ export async function buildGraph(
     nodeMap.get(url)!.section = section
   }
 
+  // ── Nav anchor detection from homepage ──
+  const homepageRec = records.find(r => r.depth === 0)
+  if (homepageRec?.html) {
+    const knownUrls = new Set(nodeMap.keys())
+    const navAnchors = extractNavAnchors(homepageRec.html, homepageRec.finalUrl || homepageRec.url, knownUrls)
+    for (const [url, source] of navAnchors) {
+      const node = nodeMap.get(url)
+      if (node) node.navSource = source
+    }
+  }
+
   const nodes = Array.from(nodeMap.values())
+  assignNavSections(nodes, edges, normalizedRoot)
 
   // ── Post-processing: community detection + semantic subclustering ──
 

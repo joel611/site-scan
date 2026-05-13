@@ -1,24 +1,24 @@
 import { readFileSync } from "fs"
 import { join, dirname } from "path"
 import { fileURLToPath } from "url"
-import type { Graph, ScanOptions } from "./types"
+import type { Graph } from "./types"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
-export async function generateReport(graph: Graph, options: ScanOptions): Promise<void> {
+export async function generateReport(graph: Graph, domain: string): Promise<void> {
   const sigmaSource = readFileSync(join(__dirname, "../node_modules/sigma/dist/sigma.min.js"), "utf-8")
   const graphologySource = readFileSync(join(__dirname, "../node_modules/graphology/dist/graphology.umd.min.js"), "utf-8")
   const forceAtlas2Source = readFileSync(join(__dirname, "vendor/forceatlas2.bundle.js"), "utf-8")
+  const noverlapSource = readFileSync(join(__dirname, "vendor/noverlap.bundle.js"), "utf-8")
   const graphJson = JSON.stringify({ nodes: graph.nodes, edges: graph.edges, stats: graph.stats })
-  const domain = options.domain
   const timestamp = new Date().toISOString()
   const outputFile = `${domain.replace(/\./g, "-")}-scan.html`
 
-  const html = buildHtml(graphJson, sigmaSource, graphologySource, forceAtlas2Source, domain, timestamp, graph.stats)
+  const html = buildHtml(graphJson, sigmaSource, graphologySource, forceAtlas2Source, noverlapSource, domain, timestamp, graph.stats)
   await Bun.write(outputFile, html)
 }
 
-function buildHtml(graphJson: string, sigmaSource: string, graphologySource: string, forceAtlas2Source: string, domain: string, timestamp: string, stats: any): string {
+function buildHtml(graphJson: string, sigmaSource: string, graphologySource: string, forceAtlas2Source: string, noverlapSource: string, domain: string, timestamp: string, stats: any): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -156,11 +156,6 @@ h3.section-title { font-size: 14px; font-weight: 600; color: #e2e8f0; margin-bot
         <div class="range-row"><span id="depth-min-label">0</span><span id="depth-max-label">10</span></div>
       </div>
       <div class="filter-group">
-        <h2>Cluster Strength</h2>
-        <input type="range" id="cluster-strength" min="0" max="100" step="1" oninput="onClusterChange()">
-        <div class="range-row"><span id="cluster-strength-label">30</span></div>
-      </div>
-      <div class="filter-group">
         <button class="toggle-btn" id="hulls-btn" onclick="toggleFilter('hulls')">Section Clusters</button>
       </div>
       <div class="filter-group">
@@ -186,6 +181,7 @@ h3.section-title { font-size: 14px; font-weight: 600; color: #e2e8f0; margin-bot
       </div>
       <div id="dp-url"></div>
       <div id="dp-meta"><span>Status: <span id="dp-status"></span></span><span id="dp-depth-meta"></span></div>
+      <div id="dp-nav-meta" style="display:none; padding: 2px 14px 8px; font-size: 11px; color: #94a3b8; display: flex; gap: 8px; flex-wrap: wrap; flex-shrink: 0;"></div>
       <button id="dp-visit" onclick="visitPage()">Visit page →</button>
       <div id="dp-body">
         <div class="dp-section" id="dp-langs-section" style="display:none">
@@ -217,6 +213,9 @@ ${graphologySource}
 ${forceAtlas2Source}
 </script>
 <script>
+${noverlapSource}
+</script>
+<script>
 ${sigmaSource}
 </script>
 <script>
@@ -228,16 +227,15 @@ const filters = {
   showOrphan: true,
   showDead: true,
   showHulls: true,
-  clusterStrength: 30,
 };
 
 // --- Color palette (Tableau10) ---
 const TABLEAU10 = ['#4e79a7','#f28e2c','#e15759','#76b7b2','#59a14f','#edc949','#af7aa1','#ff9da7','#9c755f','#bab0ab'];
 const hasCommunityData = GRAPH_DATA.nodes.some(n => n.community);
-// Group key: community when present (new scans), section fallback (legacy data)
-const colorGroups = [...new Set(GRAPH_DATA.nodes.map(n => (hasCommunityData ? n.community : null) || n.section))];
+// Group key: navSection (nav-detected) > community > section
+const colorGroups = [...new Set(GRAPH_DATA.nodes.map(n => n.navSection || (hasCommunityData ? n.community : null) || n.section))];
 const colorScale = (group) => TABLEAU10[colorGroups.indexOf(group) % TABLEAU10.length];
-function getGroupKey(n) { return (hasCommunityData ? n.community : null) || n.section; }
+function getGroupKey(n) { return n.navSection || (hasCommunityData ? n.community : null) || n.section; }
 
 function colorWithOpacity(hex, opacity) {
   const r = parseInt(hex.slice(1,3), 16);
@@ -290,16 +288,6 @@ function buildSidebar() {
   filters.depthMax = maxDepth;
   document.getElementById('depth-max-label').textContent = maxDepth;
 
-  const clusterEl = document.getElementById('cluster-strength');
-  clusterEl.value = filters.clusterStrength;
-  document.getElementById('cluster-strength-label').textContent = filters.clusterStrength;
-}
-
-function onClusterChange() {
-  const el = document.getElementById('cluster-strength');
-  filters.clusterStrength = +el.value;
-  document.getElementById('cluster-strength-label').textContent = filters.clusterStrength;
-  refreshGraph();
 }
 
 function applyFilters() {
@@ -336,47 +324,6 @@ function isVisible(n) {
     && (filters.showDead || !n.dead);
 }
 
-function applyClustering(baseline, strength) {
-  const visibleNodes = GRAPH_DATA.nodes.filter(n => isVisible(n));
-  const byGroup = {};
-  visibleNodes.forEach(n => {
-    const key = getGroupKey(n);
-    if (!byGroup[key]) byGroup[key] = [];
-    byGroup[key].push(n.id);
-  });
-
-  const positions = {};
-  for (const [id, pos] of Object.entries(baseline)) {
-    positions[id] = { x: pos.x, y: pos.y };
-  }
-
-  for (let iter = 0; iter < 30; iter++) {
-    const centroids = {};
-    for (const [group, nodeIds] of Object.entries(byGroup)) {
-      let cx = 0, cy = 0;
-      for (const id of nodeIds) {
-        cx += positions[id].x;
-        cy += positions[id].y;
-      }
-      centroids[group] = { x: cx / nodeIds.length, y: cy / nodeIds.length };
-    }
-    for (const [group, nodeIds] of Object.entries(byGroup)) {
-      const c = centroids[group];
-      for (const id of nodeIds) {
-        const p = positions[id];
-        p.x += strength * (c.x - p.x);
-        p.y += strength * (c.y - p.y);
-      }
-    }
-  }
-
-  for (const n of visibleNodes) {
-    const p = positions[n.id];
-    graph.setNodeAttribute(n.id, 'x', p.x);
-    graph.setNodeAttribute(n.id, 'y', p.y);
-  }
-}
-
 // --- Convex hull (Graham scan) ---
 function cross(o, a, b) {
   return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
@@ -398,6 +345,211 @@ function convexHull(points) {
   lower.pop();
   upper.pop();
   return lower.concat(upper);
+}
+
+// --- Color utilities ---
+function mixColors(hex1, hex2, ratio) {
+  const r1 = parseInt(hex1.slice(1,3),16), g1 = parseInt(hex1.slice(3,5),16), b1 = parseInt(hex1.slice(5,7),16);
+  const r2 = parseInt(hex2.slice(1,3),16), g2 = parseInt(hex2.slice(3,5),16), b2 = parseInt(hex2.slice(5,7),16);
+  const r = Math.round(r1 + (r2-r1)*ratio);
+  const g = Math.round(g1 + (g2-g1)*ratio);
+  const b = Math.round(b1 + (b2-b1)*ratio);
+  return '#' + r.toString(16).padStart(2,'0') + g.toString(16).padStart(2,'0') + b.toString(16).padStart(2,'0');
+}
+function hexToHsl(hex) {
+  const r = parseInt(hex.slice(1,3),16)/255, g = parseInt(hex.slice(3,5),16)/255, b = parseInt(hex.slice(5,7),16)/255;
+  const max = Math.max(r,g,b), min = Math.min(r,g,b);
+  let h = 0, s = 0, l = (max+min)/2;
+  if (max !== min) {
+    const d = max-min;
+    s = l > 0.5 ? d/(2-max-min) : d/(max+min);
+    switch(max) {
+      case r: h = ((g-b)/d + (g<b?6:0))/6; break;
+      case g: h = ((b-r)/d + 2)/6; break;
+      case b: h = ((r-g)/d + 4)/6; break;
+    }
+  }
+  return [h*360, s*100, l*100];
+}
+function hslToHex(h, s, l) {
+  h /= 360; s /= 100; l /= 100;
+  let r, g, b;
+  if (s === 0) { r = g = b = l; }
+  else {
+    const q = l < 0.5 ? l*(1+s) : l+s-l*s, p = 2*l-q;
+    const hue2rgb = (p, q, t) => {
+      if (t<0) t+=1; if (t>1) t-=1;
+      if (t<1/6) return p+(q-p)*6*t;
+      if (t<1/2) return q;
+      if (t<2/3) return p+(q-p)*(2/3-t)*6;
+      return p;
+    };
+    r = hue2rgb(p,q,h+1/3); g = hue2rgb(p,q,h); b = hue2rgb(p,q,h-1/3);
+  }
+  const hex2 = x => Math.round(x*255).toString(16).padStart(2,'0');
+  return '#' + hex2(r) + hex2(g) + hex2(b);
+}
+
+// --- Node role classification ---
+function computeNodeRoles(nodes) {
+  const roles = new Map();
+  for (const n of nodes) {
+    if (n.depth === 0) roles.set(n.id, 'sun');
+    else if (n.orphan || n.status !== 200) roles.set(n.id, 'asteroid');
+    else if (n.navSource === 'nav' || n.navSource === 'footer') roles.set(n.id, 'planet');
+  }
+  // Non-anchor nodes in a navSection group → moon; nav anchor is already the planet for that group
+  const navPlanetSections = new Set(
+    nodes.filter(n => roles.get(n.id) === 'planet').map(n => n.navSection).filter(Boolean)
+  );
+  for (const n of nodes) {
+    if (roles.has(n.id)) continue;
+    if (n.navSection && navPlanetSections.has(n.navSection)) roles.set(n.id, 'moon');
+  }
+  // Fallback: community-based planet for nodes without navSection coverage
+  const candidates = nodes.filter(n => !roles.has(n.id) && n.community != null);
+  const allCommunities = new Set(candidates.map(n => n.community));
+  if (allCommunities.size <= 1) {
+    nodes.forEach(n => { if (!roles.has(n.id)) roles.set(n.id, 'moon'); });
+    return roles;
+  }
+  const communityMinDepth = new Map();
+  for (const n of candidates) {
+    const cur = communityMinDepth.get(n.community);
+    if (cur === undefined || n.depth < cur) communityMinDepth.set(n.community, n.depth);
+  }
+  for (const n of nodes) {
+    if (roles.has(n.id)) continue;
+    if (n.community != null && n.depth === communityMinDepth.get(n.community)) roles.set(n.id, 'planet');
+    else roles.set(n.id, 'moon');
+  }
+  return roles;
+}
+
+// --- Role-based sizing ---
+function getRoleSize(n, role, tierMaxInbound) {
+  if (role === 'sun') return 45;
+  if (role === 'asteroid') return 8;
+  const [baseMin, baseMax] = role === 'planet' ? [22, 28] : [11, 16];
+  const maxInbound = tierMaxInbound[role] || 1;
+  const navMultiplier = n.navSource === 'nav' ? 1.5 : n.navSource === 'footer' ? 1.3 : 1.0;
+  return baseMin + (baseMax-baseMin) * Math.min(1, (n.inbound * navMultiplier)/maxInbound);
+}
+
+// --- Role-based color ---
+function getRoleColor(n, role) {
+  if (role === 'sun') return '#FFD700';
+  const baseHex = colorScale(getGroupKey(n));
+  if (n.status !== 200) return mixColors(baseHex, '#FF4444', 0.6);
+  if (role === 'planet') return baseHex;
+  const [h, s, l] = hexToHsl(baseHex);
+  if (role === 'moon') return hslToHex(h, s*0.7, l*0.7);
+  return hslToHex(h, s*0.4, 60); // asteroid
+}
+
+// --- Orbital seed ---
+function computeOrbitalPositions(nodes, roles) {
+  const positions = new Map();
+  const nodeCount = nodes.length;
+  const planetRadius = 8 * Math.sqrt(nodeCount);
+  const moonRadius = planetRadius * 2;
+  const asteroidRadius = planetRadius * 3;
+
+  const sunNode = nodes.find(n => n.depth === 0);
+  if (sunNode) positions.set(sunNode.id, { x: 0, y: 0 });
+
+  const byCommunity = new Map();
+  for (const n of nodes) {
+    const role = roles.get(n.id);
+    if (role === 'sun') continue;
+    const key = n.community != null ? n.community : '__orphan__';
+    if (!byCommunity.has(key)) byCommunity.set(key, { planets: [], moons: [], asteroids: [] });
+    const g = byCommunity.get(key);
+    if (role === 'planet') g.planets.push(n);
+    else if (role === 'moon') g.moons.push(n);
+    else g.asteroids.push(n);
+  }
+
+  const communityKeys = [...byCommunity.keys()].filter(k => k !== '__orphan__');
+  const communitySizes = new Map();
+  for (const key of communityKeys) {
+    const g = byCommunity.get(key);
+    communitySizes.set(key, g.planets.length + g.moons.length + g.asteroids.length);
+  }
+  const totalCommunityNodes = [...communitySizes.values()].reduce((a,b) => a+b, 0) || 1;
+
+  let arcStart = 0;
+  const communityArcStart = new Map();
+  const communityArcFraction = new Map();
+  for (const key of communityKeys) {
+    const fraction = (communitySizes.get(key) || 0) / totalCommunityNodes;
+    communityArcStart.set(key, arcStart);
+    communityArcFraction.set(key, fraction);
+    arcStart += fraction * 2 * Math.PI;
+  }
+
+  for (const key of communityKeys) {
+    const g = byCommunity.get(key);
+    const arcFraction = communityArcFraction.get(key);
+    const arcStartAngle = communityArcStart.get(key);
+    const arcSpan = arcFraction * 2 * Math.PI * 0.8;
+    const centroidAngle = arcStartAngle + arcFraction * Math.PI;
+
+    const numPlanets = g.planets.length;
+    g.planets.forEach((n, i) => {
+      const angle = arcStartAngle + arcFraction * 2 * Math.PI * ((i + 0.5) / (numPlanets || 1));
+      positions.set(n.id, { x: Math.cos(angle)*planetRadius, y: Math.sin(angle)*planetRadius });
+    });
+
+    const sortedMoons = [...g.moons].sort((a, b) => {
+      if (a.subcluster == null && b.subcluster != null) return 1;
+      if (a.subcluster != null && b.subcluster == null) return -1;
+      if (a.subcluster != null && b.subcluster != null) return String(a.subcluster).localeCompare(String(b.subcluster));
+      return 0;
+    });
+    const moonLocalRadius = planetRadius * 0.55;
+    sortedMoons.forEach((n, i) => {
+      if (numPlanets === 0) {
+        const offset = sortedMoons.length > 1 ? arcSpan*(i/(sortedMoons.length-1)) - arcSpan/2 : 0;
+        positions.set(n.id, { x: Math.cos(centroidAngle+offset)*moonRadius, y: Math.sin(centroidAngle+offset)*moonRadius });
+        return;
+      }
+      const planetIndex = i % numPlanets;
+      const planet = g.planets[planetIndex];
+      const planetPos = positions.get(planet.id);
+      const planetAngle = Math.atan2(planetPos.y, planetPos.x);
+      const moonsForPlanet = Math.ceil(sortedMoons.length / numPlanets);
+      const indexForPlanet = Math.floor(i / numPlanets);
+      const spread = moonsForPlanet > 1 ? (Math.PI * 1.2) / (moonsForPlanet - 1) : 0;
+      const moonAngle = planetAngle + indexForPlanet * spread - (spread * (moonsForPlanet - 1) / 2);
+      positions.set(n.id, {
+        x: planetPos.x + Math.cos(moonAngle) * moonLocalRadius,
+        y: planetPos.y + Math.sin(moonAngle) * moonLocalRadius,
+      });
+    });
+
+    g.asteroids.forEach((n, i) => {
+      const jitter = (i*0.5 + 0.3) * (i%2===0 ? 1 : -1);
+      const angle = centroidAngle + jitter;
+      const r = asteroidRadius * (0.9 + (i%3)*0.1);
+      positions.set(n.id, { x: Math.cos(angle)*r, y: Math.sin(angle)*r });
+    });
+  }
+
+  const orphanGroup = byCommunity.get('__orphan__');
+  if (orphanGroup) {
+    const orphans = [...orphanGroup.planets, ...orphanGroup.moons, ...orphanGroup.asteroids];
+    orphans.forEach((n, i) => {
+      const angle = (i / Math.max(1, orphans.length)) * 2 * Math.PI;
+      positions.set(n.id, { x: Math.cos(angle)*asteroidRadius, y: Math.sin(angle)*asteroidRadius });
+    });
+  }
+
+  for (const n of nodes) {
+    if (!positions.has(n.id)) positions.set(n.id, { x: Math.random()*100, y: Math.random()*100 });
+  }
+
+  return positions;
 }
 
 // --- Graph setup ---
@@ -425,15 +577,27 @@ function getPathLabel(url) {
   }
 }
 
+const nodeRoles = computeNodeRoles(GRAPH_DATA.nodes);
+
+const tierMaxInbound = { sun: 0, planet: 0, moon: 0, asteroid: 0 };
+GRAPH_DATA.nodes.forEach(n => {
+  const role = nodeRoles.get(n.id);
+  if (role && n.inbound > tierMaxInbound[role]) tierMaxInbound[role] = n.inbound;
+});
+
+const orbitalPositions = computeOrbitalPositions(GRAPH_DATA.nodes, nodeRoles);
+
 const Graph = graphology.Graph;
 const graph = new Graph();
 
 GRAPH_DATA.nodes.forEach(n => {
+  const nRole = nodeRoles.get(n.id) || 'moon';
+  const pos = orbitalPositions.get(n.id) || { x: 0, y: 0 };
   graph.addNode(n.id, {
-    x: Math.random() * 100,
-    y: Math.random() * 100,
-    size: Math.max(5, Math.min(20, 5 + n.inbound * 0.8)),
-    color: colorScale(getGroupKey(n)),
+    x: pos.x,
+    y: pos.y,
+    size: getRoleSize(n, nRole, tierMaxInbound),
+    color: getRoleColor(n, nRole),
     label: GRAPH_DATA.stats.isMultilingual && n.lang !== 'default'
       ? getPathLabel(n.url) + ' (' + n.lang + ')'
       : getPathLabel(n.url),
@@ -442,6 +606,8 @@ GRAPH_DATA.nodes.forEach(n => {
     section: n.section,
     community: n.community,
     subcluster: n.subcluster,
+    navSource: n.navSource,
+    navSection: n.navSection,
     orphan: n.orphan,
     dead: n.dead,
     status: n.status,
@@ -451,6 +617,7 @@ GRAPH_DATA.nodes.forEach(n => {
     outbound: n.outbound,
     langVariants: n.langVariants,
     missingLangs: n.missingLangs,
+    role: nRole,
   });
 });
 
@@ -460,16 +627,47 @@ GRAPH_DATA.edges.forEach(e => {
   }
 });
 
-// --- Layout ---
-forceAtlas2(graph, {
-  iterations: 300,
-  settings: {
-    gravity: 1,
-    scalingRatio: 2,
-    strongGravityMode: true,
-    slowDown: 2,
-  },
+graph.forEachEdge((edge, _attrs, source, target) => {
+  const srcCom = graph.getNodeAttribute(source, 'community');
+  const tgtCom = graph.getNodeAttribute(target, 'community');
+  graph.setEdgeAttribute(edge, 'weight', srcCom != null && srcCom === tgtCom ? 2.0 : 0.3);
 });
+
+const _sunNode = GRAPH_DATA.nodes.find(n => n.depth === 0);
+if (_sunNode) graph.setNodeAttribute(_sunNode.id, 'fixed', true);
+
+// Set FA2 mass per role so heavier nodes anchor their community
+graph.forEachNode((id, attrs) => {
+  const mass = ({ sun: 60, planet: 20, moon: 4, asteroid: 1 })[attrs.role] ?? 4;
+  graph.setNodeAttribute(id, 'mass', mass);
+});
+
+// --- Layout ---
+function getFA2Settings(nodeCount) {
+  const isSmall  = nodeCount < 300;
+  const isMedium = nodeCount >= 300  && nodeCount < 1500;
+  const isLarge  = nodeCount >= 1500 && nodeCount < 8000;
+  return {
+    gravity:                        isSmall ? 0.9 : isMedium ? 0.6 : isLarge ? 0.35 : 0.15,
+    scalingRatio:                   isSmall ? 8   : isMedium ? 18  : isLarge ? 40   : 80,
+    slowDown:                       isSmall ? 1   : isMedium ? 2   : isLarge ? 3    : 5,
+    strongGravityMode:              false,
+    barnesHutOptimize:              nodeCount > 200,
+    barnesHutTheta:                 isLarge ? 0.8 : 0.6,
+    edgeWeightInfluence:            0.8,
+    outboundAttractionDistribution: true,
+    linLogMode:                     false,
+    adjustSizes:                    true,
+  };
+}
+
+const _nodeCount = GRAPH_DATA.nodes.length;
+forceAtlas2.assign(graph, {
+  iterations: _nodeCount < 300 ? 200 : _nodeCount < 1500 ? 175 : 150,
+  settings: getFA2Settings(_nodeCount),
+});
+
+noverlap.assign(graph, { maxIterations: 20, ratio: 1.1, margin: 8, expansion: 1.05 });
 
 // Store baseline positions for deterministic re-clustering
 const baselinePositions = {};
@@ -486,9 +684,12 @@ const sigma = new Sigma(graph, container, {
   renderLabels: true,
   labelSize: 9,
   labelColor: { color: '#64748b' },
-  labelDensity: 0,
-  labelGridCellSize: 0,
-  labelRenderedSizeThreshold: 0,
+  labelDensity: 0.1,
+  labelGridCellSize: 70,
+  labelRenderedSizeThreshold: 6,
+  hideEdgesOnMove: true,
+  minCameraRatio: 0.002,
+  maxCameraRatio: 50,
   zIndex: true,
   defaultNodeColor: '#999',
   defaultEdgeColor: '#2d3148',
@@ -498,6 +699,21 @@ const sigma = new Sigma(graph, container, {
 let selectedNodeId = null;
 let panelNode = null;
 let hoveredNodeId = null;
+let planetFocusId = null;
+
+// Blend hex color toward dark bg (#0f172a) by amount [0..1]
+function dimColor(hex, amount) {
+  const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  const br = 15, bg_ = 23, bb = 42; // #0f172a
+  const to = (c, base) => Math.round(base + (c - base) * amount);
+  return '#' + [to(r,br), to(g,bg_), to(b,bb)].map(v => v.toString(16).padStart(2,'0')).join('');
+}
+// Lighten hex color by factor (1.0 = no change, 1.5 = 50% toward white)
+function brightenColor(hex, factor) {
+  const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  const up = (c) => Math.round(Math.min(255, c + (255-c)*(factor-1)/factor));
+  return '#' + [up(r),up(g),up(b)].map(v => v.toString(16).padStart(2,'0')).join('');
+}
 
 sigma.setSetting('nodeReducer', (node, data) => {
   if (!isVisible(data)) return { ...data, hidden: true };
@@ -505,18 +721,16 @@ sigma.setSetting('nodeReducer', (node, data) => {
   const isHovered = node === hoveredNodeId;
   const neighbors = hoveredNodeId ? neighborMap.get(hoveredNodeId) : null;
   const isNeighbor = neighbors ? neighbors.has(node) : false;
-  let opacity = data.orphan ? 0.35 : 0.9;
-  if (hoveredNodeId && node !== hoveredNodeId && !isNeighbor) {
-    opacity = 0.15;
-  }
+  const isDim = (planetFocusId && data.community !== graph.getNodeAttribute(planetFocusId, 'community'))
+    || (hoveredNodeId && !isHovered && !isNeighbor);
   return {
     ...data,
-    color: data.dead ? '#ef4444' : colorScale(getGroupKey(data)),
+    color: isDim ? dimColor(data.color, data.orphan ? 0.15 : 0.2) : data.color,
+    size: isSelected ? data.size * 1.4 : isHovered ? data.size * 1.2 : data.size,
     zIndex: data.dead ? 2 : (data.orphan ? 0 : 1),
     highlighted: isSelected || isHovered,
     borderColor: isSelected ? '#ffffff' : (data.dead ? '#dc2626' : 'rgba(255,255,255,0.15)'),
     borderSize: isSelected ? 2 : 1,
-    opacity,
   };
 });
 
@@ -526,24 +740,44 @@ sigma.setSetting('edgeReducer', (edge, data) => {
   const sourceData = graph.getNodeAttributes(source);
   const targetData = graph.getNodeAttributes(target);
   if (!isVisible(sourceData) || !isVisible(targetData)) return { ...data, hidden: true };
+  if (planetFocusId) {
+    const focusedCommunity = graph.getNodeAttribute(planetFocusId, 'community');
+    const inFocus = sourceData.community === focusedCommunity && targetData.community === focusedCommunity;
+    return { ...data, color: inFocus ? brightenColor('#a78bfa', 1.3) : dimColor('#2d3148', 0.15), size: inFocus ? data.size * 2 : data.size * 0.4 };
+  }
   const isHighlighted = hoveredNodeId && (source === hoveredNodeId || target === hoveredNodeId);
   return {
     ...data,
-    color: isHighlighted ? '#a78bfa' : '#2d3148',
-    opacity: hoveredNodeId && !isHighlighted ? 0.1 : 1,
+    color: isHighlighted ? brightenColor('#a78bfa', 1.3) : dimColor('#2d3148', hoveredNodeId ? 0.15 : 1.0),
+    size: isHighlighted ? Math.max(2, data.size * 3) : data.size * (hoveredNodeId ? 0.4 : 1),
   };
 });
 
 // --- Events ---
 sigma.on('clickNode', ({ node, event }) => {
   event.original.stopPropagation();
+  const role = graph.getNodeAttribute(node, 'role');
+  if (role === 'planet') {
+    if (planetFocusId === node) {
+      planetFocusId = null;
+      closePanel();
+    } else {
+      planetFocusId = node;
+      openPanel(nodeById.get(node));
+    }
+    sigma.refresh();
+    return;
+  }
   if (selectedNodeId === node) {
     closePanel();
   } else {
     openPanel(nodeById.get(node));
   }
 });
-sigma.on('clickStage', () => closePanel());
+sigma.on('clickStage', () => {
+  planetFocusId = null;
+  closePanel();
+});
 
 sigma.on('enterNode', ({ node, event }) => {
   hoveredNodeId = node;
@@ -662,7 +896,6 @@ sigma.on('afterRender', () => {
 });
 
 function refreshGraph() {
-  applyClustering(baselinePositions, filters.clusterStrength / 100);
   sigma.refresh();
 }
 
@@ -780,6 +1013,25 @@ function openPanel(node) {
   document.getElementById('dp-url').textContent = node.url;
   document.getElementById('dp-status').textContent = node.status || 'timeout';
   document.getElementById('dp-depth-meta').textContent = 'Depth: ' + node.depth;
+  const navMeta = document.getElementById('dp-nav-meta');
+  navMeta.innerHTML = '';
+  if (node.navSource) {
+    const srcBadge = document.createElement('span');
+    const color = node.navSource === 'nav' ? '#a78bfa' : '#76b7b2';
+    srcBadge.style.cssText = \`background:#1e2235;border:1px solid \${color};color:\${color};border-radius:4px;padding:1px 6px;font-size:10px;font-weight:600;\`;
+    srcBadge.textContent = node.navSource === 'nav' ? '⬆ nav' : '⬇ footer';
+    navMeta.appendChild(srcBadge);
+  }
+  if (node.navSection) {
+    const secEl = document.createElement('span');
+    let navPath;
+    try { navPath = new URL(node.navSection).pathname || '/'; } catch(_) { navPath = node.navSection; }
+    secEl.style.cssText = 'color:#64748b;font-size:11px;';
+    secEl.textContent = 'nav group: ' + navPath;
+    secEl.title = node.navSection;
+    navMeta.appendChild(secEl);
+  }
+  navMeta.style.display = (node.navSource || node.navSection) ? 'flex' : 'none';
   renderLangs(node);
   renderSources(node.id);
   renderBacklinks(node.id);

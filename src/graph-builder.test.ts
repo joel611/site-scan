@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test"
-import { buildGraph, inferSectionFromInbound, extractBaseSection, filterHighIndegreeEdges, extractPageText, runLeidenCommunityDetection, runHdbscanSubclustering, detectLangPrefixes, mergeMultilingualRecords } from "./graph-builder"
+import { buildGraph, inferSectionFromInbound, extractBaseSection, filterHighIndegreeEdges, extractPageText, runLeidenCommunityDetection, runHdbscanSubclustering, detectLangPrefixes, mergeMultilingualRecords, extractNavAnchors, assignNavSections } from "./graph-builder"
 import type { CrawlRecord, Graph, GraphNode, GraphEdge } from "./types"
 
 function makeNode(id: string, section: string): GraphNode {
@@ -18,6 +18,8 @@ function makeNode(id: string, section: string): GraphNode {
     dead: false,
     community: "c0",
     subcluster: null,
+    navSource: null,
+    navSection: null,
   }
 }
 
@@ -174,6 +176,16 @@ describe("mergeMultilingualRecords", () => {
     const result = mergeMultilingualRecords(records, ["en", "fr"])
     expect(result).toHaveLength(2)
     expect(result[0]!.url).toBe("https://example.com/about")
+  })
+
+  test("canonical root gets depth 0 when plain root (depth 0) and lang variants (depth 1) both exist", () => {
+    const rootRec: CrawlRecord = { url: "https://example.com/", finalUrl: "https://example.com/", title: "Home", status: 200, depth: 0, outboundLinks: [] }
+    const enRec: CrawlRecord = { url: "https://example.com/en/", finalUrl: "https://example.com/en/", title: "Home EN", status: 200, depth: 1, outboundLinks: [] }
+    const frRec: CrawlRecord = { url: "https://example.com/fr/", finalUrl: "https://example.com/fr/", title: "Home FR", status: 200, depth: 1, outboundLinks: [] }
+    const result = mergeMultilingualRecords([rootRec, enRec, frRec], ["en", "fr"])
+    const canonical = result.find(r => r.url === "https://example.com/")
+    expect(canonical).toBeDefined()
+    expect(canonical!.depth).toBe(0)
   })
 })
 
@@ -332,6 +344,7 @@ function makeFullNode(url: string, depth: number, inbound: number, outbound: num
     section: "test", lang: "default", pattern: "/test",
     inbound, outbound, orphan: false, dead: false,
     community: "c0", subcluster: null,
+    navSource: null, navSection: null,
   }
 }
 
@@ -627,4 +640,178 @@ describe("runHdbscanSubclustering", () => {
       expect("_embedding" in node).toBe(false)
     }
   })
+})
+
+// ── extractNavAnchors ────────────────────────────────────────────────────────
+
+describe("extractNavAnchors", () => {
+  const base = "https://example.com/"
+  const known = new Set([
+    "https://example.com/services",
+    "https://example.com/about",
+    "https://example.com/contact",
+    "https://example.com/blog",
+  ])
+
+  test("detects nav links from header", () => {
+    const html = `<html><body><header><nav><a href="/services">Services</a></nav></header></body></html>`
+    const result = extractNavAnchors(html, base, known)
+    expect(result.get("https://example.com/services")).toBe("nav")
+  })
+
+  test("detects nav links from nav element", () => {
+    const html = `<html><body><nav><a href="/about">About</a></nav></body></html>`
+    const result = extractNavAnchors(html, base, known)
+    expect(result.get("https://example.com/about")).toBe("nav")
+  })
+
+  test("detects footer links", () => {
+    const html = `<html><body><footer><a href="/contact">Contact</a></footer></body></html>`
+    const result = extractNavAnchors(html, base, known)
+    expect(result.get("https://example.com/contact")).toBe("footer")
+  })
+
+  test("nav beats footer for same URL", () => {
+    const html = `<html><body><nav><a href="/about">About</a></nav><footer><a href="/about">About</a></footer></body></html>`
+    const result = extractNavAnchors(html, base, known)
+    expect(result.get("https://example.com/about")).toBe("nav")
+  })
+
+  test("ignores URLs not in known set", () => {
+    const html = `<html><body><nav><a href="/unknown-page">Unknown</a></nav></body></html>`
+    const result = extractNavAnchors(html, base, known)
+    expect(result.has("https://example.com/unknown-page")).toBe(false)
+  })
+
+  test("returns empty map when no nav/footer markup", () => {
+    const html = `<html><body><main><a href="/services">Services</a></main></body></html>`
+    const result = extractNavAnchors(html, base, known)
+    expect(result.size).toBe(0)
+  })
+
+  test("ignores external links", () => {
+    const html = `<html><body><nav><a href="https://other.com/page">External</a></nav></body></html>`
+    const result = extractNavAnchors(html, base, known)
+    expect(result.has("https://other.com/page")).toBe(false)
+  })
+})
+
+// ── assignNavSections ────────────────────────────────────────────────────────
+
+describe("assignNavSections", () => {
+  function makeNavNode(id: string, navSource: "nav" | "footer" | null): GraphNode {
+    return { ...makeNode(id, "test"), navSource, navSection: null }
+  }
+
+  test("nav anchor gets its own URL as navSection", () => {
+    const nodes = [makeNavNode("https://example.com/services", "nav")]
+    const edges: GraphEdge[] = []
+    assignNavSections(nodes, edges)
+    expect(nodes[0]!.navSection).toBe("https://example.com/services")
+  })
+
+  test("direct child of nav anchor assigned navSection", () => {
+    const nodes = [
+      makeNavNode("https://example.com/services", "nav"),
+      makeNavNode("https://example.com/services/consulting", null),
+    ]
+    const edges: GraphEdge[] = [
+      { source: "https://example.com/services", target: "https://example.com/services/consulting" },
+    ]
+    assignNavSections(nodes, edges)
+    expect(nodes[1]!.navSection).toBe("https://example.com/services")
+  })
+
+  test("shortest path wins when multiple paths exist", () => {
+    const nodes = [
+      makeNavNode("https://example.com/blog", "nav"),
+      makeNavNode("https://example.com/news", "nav"),
+      makeNavNode("https://example.com/shared", null),
+      makeNavNode("https://example.com/intermediate", null),
+    ]
+    const edges: GraphEdge[] = [
+      { source: "https://example.com/blog", target: "https://example.com/shared" }, // 1 hop
+      { source: "https://example.com/news", target: "https://example.com/intermediate" },
+      { source: "https://example.com/intermediate", target: "https://example.com/shared" }, // 2 hops
+    ]
+    assignNavSections(nodes, edges)
+    expect(nodes[2]!.navSection).toBe("https://example.com/blog")
+  })
+
+  test("nav anchor wins over footer anchor on equal distance", () => {
+    const nodes = [
+      makeNavNode("https://example.com/about", "nav"),
+      makeNavNode("https://example.com/legal", "footer"),
+      makeNavNode("https://example.com/page", null),
+    ]
+    const edges: GraphEdge[] = [
+      { source: "https://example.com/about", target: "https://example.com/page" },
+      { source: "https://example.com/legal", target: "https://example.com/page" },
+    ]
+    assignNavSections(nodes, edges)
+    expect(nodes[2]!.navSection).toBe("https://example.com/about")
+  })
+
+  test("unreachable node gets null navSection", () => {
+    const nodes = [
+      makeNavNode("https://example.com/services", "nav"),
+      makeNavNode("https://example.com/orphan", null),
+    ]
+    const edges: GraphEdge[] = []
+    assignNavSections(nodes, edges)
+    expect(nodes[1]!.navSection).toBeNull()
+  })
+
+  test("footer anchor gets its own URL as navSection", () => {
+    const nodes = [makeNavNode("https://example.com/legal", "footer")]
+    const edges: GraphEdge[] = []
+    assignNavSections(nodes, edges)
+    expect(nodes[0]!.navSection).toBe("https://example.com/legal")
+  })
+
+  test("post detail linked from home and listing page groups under listing, not root", () => {
+    const root = "https://example.com/"
+    const nodes = [
+      { ...makeNavNode(root, "nav"), depth: 0 },                                         // home (nav anchor)
+      makeNavNode("https://example.com/blog", "nav"),                                    // blog listing (nav anchor)
+      makeNavNode("https://example.com/blog/post-1", null),                              // post detail
+    ]
+    const edges: GraphEdge[] = [
+      { source: root, target: "https://example.com/blog/post-1" },                      // home → post (direct/featured)
+      { source: "https://example.com/blog", target: "https://example.com/blog/post-1" }, // blog → post
+    ]
+    assignNavSections(nodes, edges, root)
+    expect(nodes[2]!.navSection).toBe("https://example.com/blog")
+  })
+})
+
+// ── buildGraph navSource/navSection integration ──────────────────────────────
+
+test("buildGraph assigns navSource and navSection from homepage HTML", async () => {
+  const homepageHtml = `
+    <html><body>
+      <nav><a href="/services">Services</a></nav>
+      <footer><a href="/contact">Contact</a></footer>
+    </body></html>
+  `
+  const records: CrawlRecord[] = [
+    { url: "https://example.com/", finalUrl: "https://example.com/", title: "Home", status: 200, depth: 0, outboundLinks: ["https://example.com/services", "https://example.com/contact"], html: homepageHtml },
+    { url: "https://example.com/services", finalUrl: "https://example.com/services", title: "Services", status: 200, depth: 1, outboundLinks: ["https://example.com/services/consulting"], html: "" },
+    { url: "https://example.com/services/consulting", finalUrl: "https://example.com/services/consulting", title: "Consulting", status: 200, depth: 2, outboundLinks: [], html: "" },
+    { url: "https://example.com/contact", finalUrl: "https://example.com/contact", title: "Contact", status: 200, depth: 1, outboundLinks: [], html: "" },
+  ]
+
+  const graph = await buildGraph(records, "https://example.com/", 50, true)
+
+  const services = graph.nodes.find(n => n.url === "https://example.com/services")
+  const consulting = graph.nodes.find(n => n.url === "https://example.com/services/consulting")
+  const contact = graph.nodes.find(n => n.url === "https://example.com/contact")
+  const home = graph.nodes.find(n => n.url === "https://example.com/")
+
+  expect(services?.navSource).toBe("nav")
+  expect(contact?.navSource).toBe("footer")
+  expect(home?.navSource).toBeNull()
+  expect(services?.navSection).toBe("https://example.com/services")
+  expect(consulting?.navSection).toBe("https://example.com/services")
+  expect(contact?.navSection).toBe("https://example.com/contact")
 })

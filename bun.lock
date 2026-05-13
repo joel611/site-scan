@@ -9,6 +9,7 @@
         "graphology": "^0.26.0",
         "graphology-communities-louvain": "^2.0.2",
         "graphology-layout-forceatlas2": "^0.10.1",
+        "graphology-layout-noverlap": "^0.4.2",
         "minimatch": "^10.2.5",
         "node-html-parser": "^7.1.0",
         "sigma": "^3.0.0",
@@ -133,6 +134,8 @@
     "graphology-indices": ["graphology-indices@0.17.0", "", { "dependencies": { "graphology-utils": "^2.4.2", "mnemonist": "^0.39.0" }, "peerDependencies": { "graphology-types": ">=0.20.0" } }, "sha512-A7RXuKQvdqSWOpn7ZVQo4S33O0vCfPBnUSf7FwE0zNCasqwZVUaCXePuWo5HBpWw68KJcwObZDHpFk6HKH6MYQ=="],
 
     "graphology-layout-forceatlas2": ["graphology-layout-forceatlas2@0.10.1", "", { "dependencies": { "graphology-utils": "^2.1.0" }, "peerDependencies": { "graphology-types": ">=0.19.0" } }, "sha512-ogzBeF1FvWzjkikrIFwxhlZXvD2+wlY54lqhsrWprcdPjopM2J9HoMweUmIgwaTvY4bUYVimpSsOdvDv1gPRFQ=="],
+
+    "graphology-layout-noverlap": ["graphology-layout-noverlap@0.4.2", "", { "dependencies": { "graphology-utils": "^2.3.0" }, "peerDependencies": { "graphology-types": ">=0.19.0" } }, "sha512-13WwZSx96zim6l1dfZONcqLh3oqyRcjIBsqz2c2iJ3ohgs3605IDWjldH41Gnhh462xGB1j6VGmuGhZ2FKISXA=="],
 
     "graphology-types": ["graphology-types@0.24.8", "", {}, "sha512-hDRKYXa8TsoZHjgEaysSRyPdT6uB78Ci8WnjgbStlQysz7xR52PInxNsmnB7IBOM1BhikxkNyCVEFgmPKnpx3Q=="],
 

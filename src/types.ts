@@ -8,6 +8,8 @@ export interface ScanOptions {
   noFilterNav: boolean
   navThreshold: number
   noEmbeddings: boolean
+  json: boolean
+  fromJson?: string
   langPrefixes?: string[]
   excludePatterns?: string[]
 }
@@ -44,6 +46,8 @@ export interface GraphNode {
   dead: boolean
   community: string
   subcluster: string | null
+  navSource: "nav" | "footer" | null
+  navSection: string | null
   langVariants?: Record<string, LangVariant>
   missingLangs?: string[]
   _embedding?: number[] | null
