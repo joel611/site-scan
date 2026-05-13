@@ -390,42 +390,6 @@ function hslToHex(h, s, l) {
   return '#' + hex2(r) + hex2(g) + hex2(b);
 }
 
-// --- Node role classification ---
-function computeNodeRoles(nodes) {
-  const roles = new Map();
-  for (const n of nodes) {
-    if (n.depth === 0) roles.set(n.id, 'sun');
-    else if (n.orphan || n.status !== 200) roles.set(n.id, 'asteroid');
-    else if (n.navSource === 'nav' || n.navSource === 'footer') roles.set(n.id, 'planet');
-  }
-  // Non-anchor nodes in a navSection group → moon; nav anchor is already the planet for that group
-  const navPlanetSections = new Set(
-    nodes.filter(n => roles.get(n.id) === 'planet').map(n => n.navSection).filter(Boolean)
-  );
-  for (const n of nodes) {
-    if (roles.has(n.id)) continue;
-    if (n.navSection && navPlanetSections.has(n.navSection)) roles.set(n.id, 'moon');
-  }
-  // Fallback: community-based planet for nodes without navSection coverage
-  const candidates = nodes.filter(n => !roles.has(n.id) && n.community != null);
-  const allCommunities = new Set(candidates.map(n => n.community));
-  if (allCommunities.size <= 1) {
-    nodes.forEach(n => { if (!roles.has(n.id)) roles.set(n.id, 'moon'); });
-    return roles;
-  }
-  const communityMinDepth = new Map();
-  for (const n of candidates) {
-    const cur = communityMinDepth.get(n.community);
-    if (cur === undefined || n.depth < cur) communityMinDepth.set(n.community, n.depth);
-  }
-  for (const n of nodes) {
-    if (roles.has(n.id)) continue;
-    if (n.community != null && n.depth === communityMinDepth.get(n.community)) roles.set(n.id, 'planet');
-    else roles.set(n.id, 'moon');
-  }
-  return roles;
-}
-
 // --- Role-based sizing ---
 function getRoleSize(n, role, tierMaxInbound) {
   if (role === 'sun') return 45;
@@ -448,7 +412,7 @@ function getRoleColor(n, role) {
 }
 
 // --- Orbital seed ---
-function computeOrbitalPositions(nodes, roles) {
+function computeOrbitalPositions(nodes) {
   const positions = new Map();
   const nodeCount = nodes.length;
   const planetRadius = 8 * Math.sqrt(nodeCount);
@@ -460,7 +424,7 @@ function computeOrbitalPositions(nodes, roles) {
 
   const byCommunity = new Map();
   for (const n of nodes) {
-    const role = roles.get(n.id);
+    const role = n.role;
     if (role === 'sun') continue;
     const key = n.community != null ? n.community : '__orphan__';
     if (!byCommunity.has(key)) byCommunity.set(key, { planets: [], moons: [], asteroids: [] });
@@ -577,21 +541,19 @@ function getPathLabel(url) {
   }
 }
 
-const nodeRoles = computeNodeRoles(GRAPH_DATA.nodes);
-
 const tierMaxInbound = { sun: 0, planet: 0, moon: 0, asteroid: 0 };
 GRAPH_DATA.nodes.forEach(n => {
-  const role = nodeRoles.get(n.id);
+  const role = n.role;
   if (role && n.inbound > tierMaxInbound[role]) tierMaxInbound[role] = n.inbound;
 });
 
-const orbitalPositions = computeOrbitalPositions(GRAPH_DATA.nodes, nodeRoles);
+const orbitalPositions = computeOrbitalPositions(GRAPH_DATA.nodes);
 
 const Graph = graphology.Graph;
 const graph = new Graph();
 
 GRAPH_DATA.nodes.forEach(n => {
-  const nRole = nodeRoles.get(n.id) || 'moon';
+  const nRole = n.role || 'moon';
   const pos = orbitalPositions.get(n.id) || { x: 0, y: 0 };
   graph.addNode(n.id, {
     x: pos.x,

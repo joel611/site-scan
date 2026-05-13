@@ -20,6 +20,7 @@ function makeNode(id: string, section: string): GraphNode {
     subcluster: null,
     navSource: null,
     navSection: null,
+    role: 'moon',
   }
 }
 
@@ -345,6 +346,7 @@ function makeFullNode(url: string, depth: number, inbound: number, outbound: num
     inbound, outbound, orphan: false, dead: false,
     community: "c0", subcluster: null,
     navSource: null, navSection: null,
+    role: 'moon',
   }
 }
 
@@ -814,4 +816,90 @@ test("buildGraph assigns navSource and navSection from homepage HTML", async () 
   expect(services?.navSection).toBe("https://example.com/services")
   expect(consulting?.navSection).toBe("https://example.com/services")
   expect(contact?.navSection).toBe("https://example.com/contact")
+})
+
+// ── buildGraph role assignment ────────────────────────────────────────────────
+
+function makeRoleRec(url: string, depth: number, outboundLinks: string[] = [], extra: Partial<CrawlRecord> = {}): CrawlRecord {
+  return { url, finalUrl: url, title: url, status: 200, depth, outboundLinks, ...extra }
+}
+
+test("buildGraph role: sun assigned to depth-0 node", async () => {
+  const records: CrawlRecord[] = [
+    makeRoleRec("https://example.com/", 0),
+  ]
+  const graph = await buildGraph(records, "https://example.com/", 50, true)
+  const home = graph.nodes.find(n => n.url === "https://example.com/")
+  expect(home?.role).toBe("sun")
+})
+
+test("buildGraph role: asteroid assigned to orphan node", async () => {
+  const records: CrawlRecord[] = [
+    makeRoleRec("https://example.com/", 0),
+    makeRoleRec("https://example.com/orphan", 1),
+  ]
+  const graph = await buildGraph(records, "https://example.com/", 50, true)
+  const orphan = graph.nodes.find(n => n.url === "https://example.com/orphan")
+  expect(orphan?.role).toBe("asteroid")
+})
+
+test("buildGraph role: asteroid assigned to non-200 node", async () => {
+  const records: CrawlRecord[] = [
+    makeRoleRec("https://example.com/", 0, ["https://example.com/dead"]),
+    { ...makeRoleRec("https://example.com/dead", 1), status: 404 },
+  ]
+  const graph = await buildGraph(records, "https://example.com/", 50, true)
+  const dead = graph.nodes.find(n => n.url === "https://example.com/dead")
+  expect(dead?.role).toBe("asteroid")
+})
+
+test("buildGraph role: planet assigned to navSource node", async () => {
+  const html = `<html><body><nav><a href="/services">Services</a></nav></body></html>`
+  const records: CrawlRecord[] = [
+    makeRoleRec("https://example.com/", 0, ["https://example.com/services"], { html }),
+    makeRoleRec("https://example.com/services", 1),
+  ]
+  const graph = await buildGraph(records, "https://example.com/", 50, true)
+  const services = graph.nodes.find(n => n.url === "https://example.com/services")
+  expect(services?.role).toBe("planet")
+})
+
+test("buildGraph role: moon assigned to navSection child of nav planet", async () => {
+  const html = `<html><body><nav><a href="/services">Services</a></nav></body></html>`
+  const records: CrawlRecord[] = [
+    makeRoleRec("https://example.com/", 0, ["https://example.com/services"], { html }),
+    makeRoleRec("https://example.com/services", 1, ["https://example.com/services/consulting"]),
+    makeRoleRec("https://example.com/services/consulting", 2),
+  ]
+  const graph = await buildGraph(records, "https://example.com/", 50, true)
+  const consulting = graph.nodes.find(n => n.url === "https://example.com/services/consulting")
+  expect(consulting?.role).toBe("moon")
+})
+
+test("buildGraph role: no-nav community-depth fallback yields planets and moons", async () => {
+  // Two dense clusters: blog (3 nodes) and shop (3 nodes) with single cross-link
+  const records: CrawlRecord[] = [
+    makeRoleRec("https://example.com/", 0, ["https://example.com/blog1", "https://example.com/shop1"]),
+    makeRoleRec("https://example.com/blog1", 1, ["https://example.com/blog2", "https://example.com/blog3"]),
+    makeRoleRec("https://example.com/blog2", 2, ["https://example.com/blog1", "https://example.com/shop1"]),
+    makeRoleRec("https://example.com/blog3", 2, ["https://example.com/blog1"]),
+    makeRoleRec("https://example.com/shop1", 1, ["https://example.com/shop2", "https://example.com/shop3"]),
+    makeRoleRec("https://example.com/shop2", 2, ["https://example.com/shop1"]),
+    makeRoleRec("https://example.com/shop3", 2, ["https://example.com/shop1"]),
+  ]
+  const graph = await buildGraph(records, "https://example.com/", 50, true)
+  const nonSunNonAsteroid = graph.nodes.filter(n => n.role !== "sun" && n.role !== "asteroid")
+  expect(nonSunNonAsteroid.some(n => n.role === "planet")).toBe(true)
+  expect(nonSunNonAsteroid.some(n => n.role === "moon")).toBe(true)
+})
+
+test("buildGraph role: no-nav single-community assigns all moons", async () => {
+  // Single small graph — all nodes end up in same community (or c-other), so all non-sun → moon
+  const records: CrawlRecord[] = [
+    makeRoleRec("https://example.com/", 0, ["https://example.com/page"]),
+    makeRoleRec("https://example.com/page", 1),
+  ]
+  const graph = await buildGraph(records, "https://example.com/", 50, true)
+  const page = graph.nodes.find(n => n.url === "https://example.com/page")
+  expect(page?.role).toBe("moon")
 })

@@ -31,6 +31,8 @@ export interface CrawlRecord {
   missingLangs?: string[]
 }
 
+export type NodeRole = 'sun' | 'planet' | 'moon' | 'asteroid'
+
 export interface GraphNode {
   id: string
   url: string
@@ -48,6 +50,7 @@ export interface GraphNode {
   subcluster: string | null
   navSource: "nav" | "footer" | null
   navSection: string | null
+  role: NodeRole
   langVariants?: Record<string, LangVariant>
   missingLangs?: string[]
   _embedding?: number[] | null
