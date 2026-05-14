@@ -696,6 +696,26 @@ describe("extractNavAnchors", () => {
     const result = extractNavAnchors(html, base, known)
     expect(result.has("https://other.com/page")).toBe(false)
   })
+
+  test("top-level nav link in single ul marked as nav", () => {
+    const html = `<html><body><nav><ul><li><a href="/services">Services</a></li></ul></nav></body></html>`
+    const result = extractNavAnchors(html, base, known)
+    expect(result.get("https://example.com/services")).toBe("nav")
+  })
+
+  test("submenu link in nested ul marked as nav-sub", () => {
+    const html = `<html><body><nav><ul><li><a href="/services">Services</a><ul><li><a href="/about">About Sub</a></li></ul></li></ul></nav></body></html>`
+    const result = extractNavAnchors(html, base, known)
+    expect(result.get("https://example.com/services")).toBe("nav")
+    expect(result.get("https://example.com/about")).toBe("nav-sub")
+  })
+
+  test("nav-sub does not overwrite nav for same url", () => {
+    // A URL appearing as both top-level and submenu should stay "nav"
+    const html = `<html><body><nav><ul><li><a href="/services">Services</a></li><li><ul><li><a href="/services">Dup</a></li></ul></li></ul></nav></body></html>`
+    const result = extractNavAnchors(html, base, known)
+    expect(result.get("https://example.com/services")).toBe("nav")
+  })
 })
 
 // ── assignNavSections ────────────────────────────────────────────────────────
@@ -891,6 +911,20 @@ test("buildGraph role: no-nav community-depth fallback yields planets and moons"
   const nonSunNonAsteroid = graph.nodes.filter(n => n.role !== "sun" && n.role !== "asteroid")
   expect(nonSunNonAsteroid.some(n => n.role === "planet")).toBe(true)
   expect(nonSunNonAsteroid.some(n => n.role === "moon")).toBe(true)
+})
+
+test("buildGraph role: submenu nav link becomes moon not planet", async () => {
+  const html = `<html><body><nav><ul><li><a href="/services">Services</a><ul><li><a href="/about">About Sub</a></li></ul></li></ul></nav></body></html>`
+  const records: CrawlRecord[] = [
+    makeRoleRec("https://example.com/", 0, ["https://example.com/services", "https://example.com/about"], { html }),
+    makeRoleRec("https://example.com/services", 1, ["https://example.com/about"]),
+    makeRoleRec("https://example.com/about", 1),
+  ]
+  const graph = await buildGraph(records, "https://example.com/", 50, true)
+  const services = graph.nodes.find(n => n.url === "https://example.com/services")
+  const about = graph.nodes.find(n => n.url === "https://example.com/about")
+  expect(services?.role).toBe("planet")
+  expect(about?.role).not.toBe("planet")
 })
 
 test("buildGraph role: no-nav single-community assigns all moons", async () => {

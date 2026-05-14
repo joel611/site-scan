@@ -48,7 +48,7 @@ export interface GraphNode {
   dead: boolean
   community: string
   subcluster: string | null
-  navSource: "nav" | "footer" | null
+  navSource: "nav" | "nav-sub" | "footer" | null
   navSection: string | null
   role: NodeRole
   langVariants?: Record<string, LangVariant>

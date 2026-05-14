@@ -440,10 +440,10 @@ export function extractNavAnchors(
   html: string,
   baseUrl: string,
   knownUrls: Set<string>
-): Map<string, "nav" | "footer"> {
+): Map<string, "nav" | "nav-sub" | "footer"> {
   if (!html) return new Map()
   const root = parse(html)
-  const result = new Map<string, "nav" | "footer">()
+  const result = new Map<string, "nav" | "nav-sub" | "footer">()
   const base = new URL(baseUrl)
 
   const normalizeHref = (href: string): string | null => {
@@ -460,18 +460,37 @@ export function extractNavAnchors(
     }
   }
 
-  // Footer first (lower priority); nav overwrites
+  const ulNestDepth = (node: any): number => {
+    let count = 0
+    let cur = node.parentNode
+    while (cur) {
+      const tag = (cur.tagName ?? '').toUpperCase()
+      if (tag === 'NAV' || tag === 'HEADER') break
+      if (tag === 'UL' || tag === 'OL') count++
+      cur = cur.parentNode
+    }
+    return count
+  }
+
+  // nav-sub first (lowest priority: nested nav links)
+  for (const a of root.querySelectorAll("header a[href], nav a[href]")) {
+    const href = a.getAttribute("href") || ""
+    const url = normalizeHref(href)
+    if (url && knownUrls.has(url) && ulNestDepth(a) >= 2) result.set(url, "nav-sub")
+  }
+
+  // Footer (overwrites nav-sub)
   for (const a of root.querySelectorAll("footer a[href]")) {
     const href = a.getAttribute("href") || ""
     const url = normalizeHref(href)
     if (url && knownUrls.has(url)) result.set(url, "footer")
   }
 
-  // Nav/header second (higher priority; overwrites footer)
+  // Top-level nav last (highest priority; overwrites footer and nav-sub)
   for (const a of root.querySelectorAll("header a[href], nav a[href]")) {
     const href = a.getAttribute("href") || ""
     const url = normalizeHref(href)
-    if (url && knownUrls.has(url)) result.set(url, "nav")
+    if (url && knownUrls.has(url) && ulNestDepth(a) < 2) result.set(url, "nav")
   }
 
   return result
@@ -507,7 +526,11 @@ export function assignNavSections(nodes: GraphNode[], edges: GraphEdge[], rootUr
   ]
 
   const nodeMap = new Map(nodes.map(n => [n.id, n]))
-  const visited = new Set<string>(navAnchors.map(n => n.id))
+  // nav-sub nodes excluded from visited so BFS from top-level nav can flow through them,
+  // giving them the correct navSection of their parent nav item
+  const visited = new Set<string>(
+    navAnchors.filter(n => n.navSource === "nav" || n.navSource === "footer").map(n => n.id)
+  )
 
   let head = 0
   while (head < queue.length) {
